@@ -104,6 +104,19 @@ impl MigrationTrait for Migration {
             .expect("Failed to execute Migration for file_types");
 
         manager
+            .create_index(
+                Index::create()
+                    .table(FileTypes::Table)
+                    .if_not_exists()
+                    .col(FileTypes::_ID)
+                    .col(FileTypes::Name)
+                    .to_owned(),
+            )
+            .await
+            .expect("Failed to create index for table files");
+
+        // Tags Migration
+        manager
             .create_table(
                 Table::create()
                     .table(Tags::Table)
@@ -117,6 +130,7 @@ impl MigrationTrait for Migration {
             .await
             .expect("Failed to execute Migration for tags");
 
+        // FileHasTags Migration
         manager
             .create_table(
                 Table::create()
@@ -130,6 +144,7 @@ impl MigrationTrait for Migration {
             .await
             .expect("Failed to execute Migration for file_has_tags");
 
+        // TagHasTags Migration
         manager
             .create_table(
                 Table::create()
