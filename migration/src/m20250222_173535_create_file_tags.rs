@@ -83,8 +83,8 @@ impl MigrationTrait for Migration {
         manager
             .create_foreign_key(
                 ForeignKey::create()
-                    .from_col(Files::FileTypeID)
-                    .to_col(FileTypes::_ID)
+                    .from(Files::Table, Files::FileTypeID)
+                    .to(FileTypes::Table, FileTypes::_ID)
                     .to_owned(),
             )
             .await
@@ -130,6 +130,18 @@ impl MigrationTrait for Migration {
             .await
             .expect("Failed to execute Migration for tags");
 
+        manager
+            .create_index(
+                Index::create()
+                    .table(Tags::Table)
+                    .if_not_exists()
+                    .col(Tags::_ID)
+                    .col(Tags::Name)
+                    .to_owned(),
+            )
+            .await
+            .expect("Failed to create index for table tags.");
+
         // FileHasTags Migration
         manager
             .create_table(
@@ -144,6 +156,26 @@ impl MigrationTrait for Migration {
             .await
             .expect("Failed to execute Migration for file_has_tags");
 
+        manager
+            .create_foreign_key(
+                ForeignKey::create()
+                    .from(FileHasTags::Table, FileHasTags::FileID)
+                    .to(Files::Table, Files::_ID)
+                    .to_owned(),
+            )
+            .await
+            .expect("Failed to create Foreign Key constraint for table FileHasTags");
+
+        manager
+            .create_foreign_key(
+                ForeignKey::create()
+                    .from(FileHasTags::Table, FileHasTags::TagID)
+                    .to(Tags::Table, Tags::_ID)
+                    .to_owned(),
+            )
+            .await
+            .expect("Failed to create Foreign Key constraint for table FileHasTags");
+
         // TagHasTags Migration
         manager
             .create_table(
@@ -157,6 +189,16 @@ impl MigrationTrait for Migration {
             )
             .await
             .expect("Failed to execute Migration for tag_has_tags");
+
+        manager
+            .create_foreign_key(
+                ForeignKey::create()
+                    .from(FileHasTags::Table, FileHasTags::TagID)
+                    .to(Tags::Table, Tags::_ID)
+                    .to_owned(),
+            )
+            .await
+            .expect("Failed to create Foreign Key constraint for table FileHasTags");
         Ok(())
     }
 
