@@ -1,7 +1,6 @@
-use crate::components::{Alert, Echo, Hero};
+use crate::components::{Echo, Hero};
 use dioxus::prelude::*;
-use dioxus_elements::div;
-use std::fs::create_dir;
+use std::fs::{create_dir, File};
 
 #[component]
 pub fn Home() -> Element {
@@ -16,6 +15,25 @@ pub fn Home() -> Element {
         },
             "Create .hestia folder"
         }
+        button {
+            class: "btn btn-primary",
+            onclick: move |_| async move {
+                let new_vault_path = rfd::FileDialog::new().set_directory("~/").pick_folder();
+
+                let result_path = create_config_folder(new_vault_path
+                                                        .unwrap()
+                                                        .to_str()
+                                                        .unwrap()
+                                                        .to_string() + "/.hestia/")
+                    .await
+                    .expect("Could not create vault folder");
+                create_database_file(result_path + "/db.sqlite")
+                    .await
+                    .expect("Could not create database file");
+
+        },
+            "New Vault"
+        }
     if dir_created() {
         input {
             r#type: "file",
@@ -25,4 +43,19 @@ pub fn Home() -> Element {
         Hero {}
         Echo {}
     }
+}
+
+#[server]
+async fn create_config_folder(path: String) -> Result<String, ServerFnError> {
+    match create_dir(path.clone()) {
+        Ok(()) => (),
+        Err(e) => println!("{:?}", e),
+    };
+    Ok(path)
+}
+
+#[server]
+async fn create_database_file(path: String) -> Result<(), ServerFnError> {
+    File::create(path)?;
+    Ok(())
 }

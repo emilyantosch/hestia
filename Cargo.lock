@@ -126,6 +126,8 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd884d7c72877a94102c3715f3b1cd09ff4fac28221add3e57cfbe25c236d093"
 dependencies = [
+ "async-fs",
+ "async-net",
  "enumflags2",
  "futures-channel",
  "futures-util",
@@ -202,6 +204,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-fs"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebcd09b382f40fcd159c2d695175b2ae620ffa5f3bd6f664131efff4e8b9e04a"
+dependencies = [
+ "async-lock",
+ "blocking",
+ "futures-lite",
+]
+
+[[package]]
 name = "async-global-executor"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,6 +258,17 @@ dependencies = [
  "event-listener 5.4.0",
  "event-listener-strategy",
  "pin-project-lite",
+]
+
+[[package]]
+name = "async-net"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b948000fad4873c1c9339d60f2623323a0cfd3816e5181033c6a5cb68b2accf7"
+dependencies = [
+ "async-io",
+ "blocking",
+ "futures-lite",
 ]
 
 [[package]]
@@ -1885,6 +1909,9 @@ checksum = "a3d8a32ae18130a3c84dd492d4215c3d913c3b07c6b63c2eb3eb7ff1101ab7bf"
 [[package]]
 name = "entity"
 version = "0.1.0"
+dependencies = [
+ "sea-orm",
+]
 
 [[package]]
 name = "enumflags2"
@@ -2677,6 +2704,7 @@ name = "hestia"
 version = "0.1.0"
 dependencies = [
  "dioxus",
+ "rfd",
  "sea-orm",
  "tokio",
 ]
@@ -7156,9 +7184,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b8e3d6ae3342792a6cc2340e4394334c7402f3d793b390d2c5494a4032b3030"
 dependencies = [
  "async-broadcast",
+ "async-executor",
+ "async-fs",
+ "async-io",
+ "async-lock",
  "async-process",
  "async-recursion",
+ "async-task",
  "async-trait",
+ "blocking",
  "derivative",
  "enumflags2",
  "event-listener 5.4.0",

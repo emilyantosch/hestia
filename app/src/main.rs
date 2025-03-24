@@ -22,6 +22,7 @@ const MAIN_CSS: Asset = asset!("/assets/styling/main.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 fn main() {
+    dioxus::fullstack::prelude::server_fn::client::set_server_url("http://127.0.0.1:8080");
     dioxus::launch(App);
 }
 
