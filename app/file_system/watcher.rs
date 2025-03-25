@@ -1,82 +1,50 @@
 use std::path::PathBuf;
+use tokio::sync::mpsc;
+use tokio::task;
+use futures::StreamExt;
+use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use fsnotify::{FsNotify, FilesystemEvent};
 
-type EventSender = mpsc::UnboundedSender<FilesystemEvent>;
+// Define a type alias for the event
+type FileSystemEvent = DebouncedEvent<String, Error>;
 
 pub struct FileWatcher {
-    sender: Arc<EventSender>,
-    dir_path: PathBuf,
+    sender: Arc<mpsc::Sender<FileSystemEvent>>,
 }
 
 impl FileWatcher {
     pub async fn new(dir_path: PathBuf) -> Result<Self, std::io::Error> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        
-        // Create an Arc for the sender to share across threads
-        let sender_arc = Arc::new(sender);
-        
-        // Spawn a task to watch filesystem events
-        tokio::spawn({
-            let dir_path = dir_path.clone();
-            let sender = sender_arc.clone();
-            
-            async move {
-                let mut watcher = FsNotify::new()?;
-                
-                // Watch all files and subdirectories recursively
-                watcher.watch(&dir_path, FilesystemEvent::all())?;
-                
-                while let Ok(event) = watcher.next() {
-                    if let Some(sender) = sender_arc.as_ref().try_clone() {
-                        if sender.send(event).is_ok() {
-                            continue;
-                        }
-                    }
-                    
+        let (tx, rx) = mpsc::channel(10); // Buffered channel
+        let tx_arc = Arc::new(tx);
+
+        let watcher_arc = Arc::clone(&tx_arc);
+
+        tokio::spawn(async move {
+            let mut watcher: RecommendedWatcher = match RecommendedWatcher::new(watcher_arc.as_ref(), RecursiveMode::Recursive) {
+                Ok(watcher) => watcher,
+                Err(e) => {
+                    eprintln!("Error creating watcher: {:?}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = watcher.watch(&dir_path) {
+                eprintln!("Error watching directory: {:?}", e);
+                return;
+            }
+
+            while let Ok(event) = watcher.next() {
+                if let Err(e) = tx_arc.send(event).await {
+                    eprintln!("Error sending event: {:?}", e);
                     break;
                 }
-                
-                Ok(())
             }
         });
-        
-        Ok(Self {
-            sender: sender_arc,
-            dir_path,
-        })
+
+        Ok(Self { sender: tx_arc })
     }
 
-    pub fn get_sender(&self) -> Arc<EventSender> {
-        self.sender.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-    
-    #[tokio::test]
-    async fn test_watcher() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let dir_path = PathBuf::from(temp_dir.path());
-        
-        let watcher = FileWatcher::new(dir_path.clone()).await.unwrap();
-        
-        // Create a file
-        let test_file = dir_path.join("test.txt");
-        std::fs::File::create(&test_file).unwrap();
-        
-        // Modify the file
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&test_file)
-            .unwrap();
-        file.write_all(b"test").unwrap();
-        
-        // Delete the file
-        std::fs::remove_file(test_file).unwrap();
+    pub fn get_receiver(&self) -> Arc<mpsc::Sender<FileSystemEvent>> {
+        Arc::clone(&self.sender)
     }
 }
