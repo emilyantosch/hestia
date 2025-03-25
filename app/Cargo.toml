@@ -14,7 +14,7 @@ sea-orm = { version = "1.1.5", features = [
   "runtime-tokio-native-tls",
   "macros",
 ] }
-rfd = { version = "*" }
+rfd = { version = "*", default-features = false, features = ["tokio", "xdg-portal"]}
 
 [features]
 server = ["dioxus/server"]

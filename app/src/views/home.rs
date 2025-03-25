@@ -25,10 +25,9 @@ pub fn Home() -> Element {
                                                         .to_str()
                                                         .unwrap()
                                                         .to_string() + "/.hestia/")
-                    .await
                     .expect("Could not create vault folder");
+
                 create_database_file(result_path + "/db.sqlite")
-                    .await
                     .expect("Could not create database file");
 
         },
@@ -45,8 +44,7 @@ pub fn Home() -> Element {
     }
 }
 
-#[server]
-async fn create_config_folder(path: String) -> Result<String, ServerFnError> {
+fn create_config_folder(path: String) -> Result<String, ServerFnError> {
     match create_dir(path.clone()) {
         Ok(()) => (),
         Err(e) => println!("{:?}", e),
@@ -54,8 +52,7 @@ async fn create_config_folder(path: String) -> Result<String, ServerFnError> {
     Ok(path)
 }
 
-#[server]
-async fn create_database_file(path: String) -> Result<(), ServerFnError> {
+fn create_database_file(path: String) -> Result<(), ServerFnError> {
     File::create(path)?;
     Ok(())
 }
