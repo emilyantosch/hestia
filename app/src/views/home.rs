@@ -1,6 +1,8 @@
 use crate::components::{Echo, Hero};
+use crate::file_system::watcher::FileWatcher;
 use dioxus::prelude::*;
 use std::fs::{create_dir, File};
+use std::path::PathBuf;
 
 #[component]
 pub fn Home() -> Element {
@@ -9,9 +11,8 @@ pub fn Home() -> Element {
     rsx! {
         button {
             class: "btn btn-primary",
-            onclick: move |_| {
-                // let _ = create_dir("~/projects/projects/hestia/.hestia");
-                dir_created.set(true);
+            onclick: async move |_| {
+                watch_folder().await;
         },
             "Create .hestia folder"
         }
@@ -42,6 +43,17 @@ pub fn Home() -> Element {
         Hero {}
         Echo {}
     }
+}
+
+async fn watch_folder() {
+    let mut watcher = FileWatcher::new().await.unwrap();
+    watcher.init_watcher().await;
+    watcher
+        .watch(&PathBuf::from(
+            r"/home/emmi/projects/projects/hestia/test_vault/",
+        ))
+        .await
+        .unwrap();
 }
 
 fn create_config_folder(path: String) -> Result<String, ServerFnError> {

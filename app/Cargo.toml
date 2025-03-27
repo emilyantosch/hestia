@@ -16,7 +16,7 @@ sea-orm = { version = "1.1.5", features = [
 ] }
 rfd = { version = "*", default-features = false, features = ["tokio", "xdg-portal"]}
 notify-debouncer-full = "0.5.0"
-notify = { version = "8.0.0"}
+notify = { version = "8.0.0", features = ["macos_kqueue"]}
 
 [features]
 server = ["dioxus/server"]

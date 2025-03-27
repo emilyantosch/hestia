@@ -1,6 +1,6 @@
-use notify::{Error, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Error, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{
-    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,10 +13,10 @@ pub struct FileWatcher {
 
 impl FileWatcher {
     pub async fn init_watcher(&mut self) {
-        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
         let rt = tokio::runtime::Handle::current();
 
-        let debouncer = new_debouncer(
+        let debouncer = new_debouncer_opt(
             Duration::from_secs(2),
             None,
             move |result: DebounceEventResult| {
@@ -29,6 +29,8 @@ impl FileWatcher {
                     };
                 });
             },
+            FileIdMap::new(),
+            Config::default(),
         );
 
         match debouncer {
@@ -45,5 +47,36 @@ impl FileWatcher {
             watcher: None,
             receiver: None,
         })
+    }
+
+    pub async fn watch(&mut self, path: &PathBuf) -> notify::Result<()> {
+        if !path.exists() {
+            panic!();
+        }
+        println!("Watching path: {:?}", path);
+
+        if let Some(watcher) = self.watcher.as_mut() {
+            watcher.watch(path, RecursiveMode::Recursive)?;
+            println!("Watcher ready!");
+
+            if let Some(mut rx) = self.receiver.take() {
+                println!("RX taken out of Option");
+                tokio::spawn(async move {
+                    println!("Spawned thread!");
+                    while let Some(res) = rx.recv().await {
+                        println!("Received events!");
+                        match res {
+                            Ok(events) => {
+                                println!("event: {:?}", events);
+                            }
+                            Err(e) => {
+                                println!("errors: {:?}", e);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        Ok(())
     }
 }
