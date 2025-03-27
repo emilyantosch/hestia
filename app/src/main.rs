@@ -2,11 +2,13 @@ use dioxus::prelude::*;
 
 use components::Navbar;
 use file_system::FileWatcher;
+use utils::*;
 use views::{Blog, Home};
 
 mod components;
 mod file_system;
 mod server;
+mod utils;
 mod views;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
@@ -25,7 +27,6 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 fn main() {
     dioxus::fullstack::prelude::server_fn::client::set_server_url("http://127.0.0.1:8080");
-    FileWatcher::new("./".into());
     dioxus::launch(App);
 }
 

@@ -1,53 +1,49 @@
-use notify::{recommended_watcher, Event, RecursiveMode, Result, Watcher};
-use notify_debouncer_full::{new_debouncer, notify::*, DebounceEventResult};
+use notify::{Error, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify_debouncer_full::{
+    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+};
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::task;
+use std::time::Duration;
+use tokio::sync::mpsc::Receiver;
 
 pub struct FileWatcher {
-    sender: Arc<mpsc::Sender<Event>>,
-    receiver: Arc<mpsc::Receiver<Event>>,
+    watcher: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
+    receiver: Option<Receiver<std::result::Result<Vec<DebouncedEvent>, Vec<Error>>>>,
 }
 
 impl FileWatcher {
-    pub async fn new(dir_path: PathBuf) -> Result<Self, std::io::Error> {
-        let (tx, rx) = mpsc::channel(10); // Buffered channel
-        let tx_arc = Arc::new(tx);
-        let rx_arc = Arc::new(rx);
-        let watcher_arc = Arc::clone(&tx_arc);
+    pub async fn init_watcher(&mut self) {
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let rt = tokio::runtime::Handle::current();
 
-        tokio::spawn(async move {
-            let mut watcher: RecommendedWatcher =
-                match RecommendedWatcher::new(watcher_arc.as_ref(), RecursiveMode::Recursive) {
-                    Ok(watcher) => watcher,
-                    Err(e) => {
-                        eprintln!("Error creating watcher: {:?}", e);
-                        return;
-                    }
-                };
+        let debouncer = new_debouncer(
+            Duration::from_secs(2),
+            None,
+            move |result: DebounceEventResult| {
+                let tx = tx.clone();
 
-            if let Err(e) = watcher.watch(&dir_path, RecursiveMode::Recursive) {
-                eprintln!("Error watching directory: {:?}", e);
-                return;
+                println!("Calling by notify => {:?}", &result);
+                rt.spawn(async move {
+                    if let Err(e) = tx.send(result).await {
+                        println!("Error sending event result: {:?}", e);
+                    };
+                });
+            },
+        );
+
+        match debouncer {
+            Ok(watcher) => {
+                println!("Init of FileWatcher completed successfully!");
+                self.watcher = Some(watcher);
+                self.receiver = Some(rx);
             }
-
-            while let Ok(event) = watcher.next() {
-                if let Err(e) = tx_arc.send(event).await {
-                    eprintln!("Error sending event: {:?}", e);
-                    break;
-                }
-                println!("Hellow :3");
-            }
-        });
-
-        Ok(Self {
-            sender: tx_arc,
-            receiver: rx_arc,
-        })
+            Err(e) => println!("{:?}", e),
+        };
     }
-
-    pub fn get_receiver(&self) -> Arc<mpsc::Sender<Event>> {
-        Arc::clone(&self.receiver)
+    pub async fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            watcher: None,
+            receiver: None,
+        })
     }
 }
