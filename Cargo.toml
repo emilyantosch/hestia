@@ -9,10 +9,6 @@ version = "0.1.0"
 [workspace.dependencies]
 
 aes-gcm = "0.10.3"
-cxx = "1.0.176"
-cxx-qt = "0.9.1"
-cxx-qt-build = { features = [ "link_qt_object_files" ], version = "0.9.1" }
-cxx-qt-lib = { default-features = false, features = [ "qt_full" ], version = "0.9.1" }
 anyhow = { version = "1.0.98" }
 argon2 = { features = [  ], version = "0.6.0-rc.0" }
 async-recursion = "1.1.1"
@@ -21,6 +17,10 @@ async-trait = "0.1.89"
 blake3 = "1.8.2"
 cfg-if = "1.0.1"
 chrono = { features = [ "serde" ], version = "0.4" }
+cxx = "1.0.176"
+cxx-qt = "0.9.1"
+cxx-qt-build = { features = [ "link_qt_object_files" ], version = "0.9.1" }
+cxx-qt-lib = { default-features = false, features = [ "qt_full" ], version = "0.9.1" }
 dirs = "6.0.0"
 image = { default-features = false, features = [ "bmp", "gif", "jpeg", "png", "tiff", "webp" ], version = "0.25" }
 infer = "0.19.0"

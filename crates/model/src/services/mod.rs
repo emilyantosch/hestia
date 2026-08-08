@@ -48,10 +48,8 @@ impl CanonPath {
         Ok(self.path.try_exists()?)
     }
 
-    pub fn as_str(&self) -> Result<&str> {
-        match self.path.to_str() {
-            Some(str) => Ok(str),
-            None => bail!("CanonPath could not be converted to &str"),
-        }
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        self.path.to_str()
     }
 }
