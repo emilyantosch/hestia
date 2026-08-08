@@ -10,7 +10,6 @@ use tokio::fs;
 use model::services::file::FileSystemFile as File;
 use model::services::folder::FileSystemFolder as Folder;
 use repositories::fs::operations::{FileMetadata, FileRepository as FileOperations};
-use tracing::info;
 
 /// Types of synchronization operations
 #[derive(Debug, Clone)]
@@ -95,7 +94,7 @@ impl DirectoryScanner {
         let start_time = Instant::now();
         let mut report = SyncReport::new();
 
-        info!("Starting directory sync for: {}", dir_path.display());
+        tracing::info!("Starting directory sync for: {}", dir_path.display());
 
         // 1. Get current database state
         let db_state = match self.file_operations.get_directory_state(dir_path).await {
@@ -107,7 +106,7 @@ impl DirectoryScanner {
             }
         };
 
-        info!("Found {} files in database", db_state.len());
+        tracing::info!("Found {} files in database", db_state.len());
 
         // 2. Scan filesystem
         let fs_files = match self.scan_filesystem_recursive(dir_path).await {
@@ -120,19 +119,19 @@ impl DirectoryScanner {
         };
 
         report.files_scanned = fs_files.0.len();
-        info!("Found {} files in filesystem", fs_files.0.len());
+        tracing::info!("Found {} files in filesystem", fs_files.0.len());
 
         report.folders_scanned = fs_files.1.len();
-        info!("Found {} folders in filesystem", fs_files.1.len());
+        tracing::info!("Found {} folders in filesystem", fs_files.1.len());
 
         // 3a. Calculate file sync operations
         let mut operations: Vec<SyncOperation> =
             self.calculate_file_sync_operations(&db_state, fs_files.0);
-        info!("Calculated {} file operations to perform", operations.len());
+        tracing::info!("Calculated {} file operations to perform", operations.len());
 
         // 3b. Calculate all sync operations
         operations.extend(self.calculate_folder_sync_operations(&db_state, fs_files.1));
-        info!(
+        tracing::info!(
             "Calculated {} file and folder operations to perform",
             operations.len()
         );

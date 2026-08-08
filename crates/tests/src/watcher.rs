@@ -3,7 +3,6 @@ use services::fs::
 use crate::file_system::FileWatcherMessage;
 use crate::file_system::watcher::{FSEvent, FileWatcher};
 use notify::EventKind::Create;
-use tracing::info;
 
 #[cfg(test)]
 use crate::file_system::TestFileWatcherEventHandler;
@@ -54,35 +53,35 @@ async fn run_test_watcher() -> Result<
 async fn on_file_create_emit_correct_event() -> Result<(), AppError> {
     let tmp_dir = tempdir().unwrap();
     let file_path = tmp_dir.path().join("test_file.txt");
-    info!("Defined test file path at {file_path:#?}");
+    tracing::info!("Defined test file path at {file_path:#?}");
 
     let mut watcher = run_test_watcher().await?;
-    info!("Watcher started");
+    tracing::info!("Watcher started");
     let _ = watcher
         .0
         .send(FileWatcherMessage::WatchPath(CanonPath::from(
             tmp_dir.path().to_path_buf(),
         )));
 
-    info!("Watcher send command to worker thread");
+    tracing::info!("Watcher send command to worker thread");
     // Give the watcher a moment to start
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create a file to trigger an event
     let mut file = std::fs::File::create(&file_path).unwrap();
-    info!("File {file:#?} created");
+    tracing::info!("File {file:#?} created");
     writeln!(file, "Hello, world!").unwrap();
-    info!("File {file:#?} written to");
+    tracing::info!("File {file:#?} written to");
     drop(file); // Close the file
 
     // Wait for the event to be processed
     // The debouncer is set to 2 seconds, plus some buffer
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    info!("Checking for change...");
+    tracing::info!("Checking for change...");
     match tokio::time::timeout(Duration::from_secs(1), watcher.1.recv()).await {
         Ok(Some(event)) => {
-            info!("Got event from worker! {event:#?}");
+            tracing::info!("Got event from worker! {event:#?}");
             assert!(matches!(
                 event.file_event.as_ref().unwrap().kind,
                 notify::EventKind::Create(CreateKind::File)

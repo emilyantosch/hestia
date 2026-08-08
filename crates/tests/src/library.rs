@@ -4,17 +4,15 @@ use library::library::LibraryConfig;
 use library::library::LibraryPathConfig;
 use std::path::PathBuf;
 use tempfile::TempDir;
-use tracing::info;
 
 #[test]
 fn check_delete_library() -> Result<()> {
     use tempfile::TempDir;
-    use tracing::{error, info};
 
     let path = dirs::data_dir().context("operating system did not provide a data directory")?;
     let test_path = TempDir::new_in(path)?;
     let lib = Library::new().switch_or_create_lib(&test_path.path().to_path_buf())?;
-    info!("Found or created library to be deleted!");
+    tracing::info!("Found or created library to be deleted!");
 
     //Assert that path exists
     assert!(
@@ -24,7 +22,7 @@ fn check_delete_library() -> Result<()> {
 
     //Delete Library
     if let Err(e) = lib.delete() {
-        error!("The lib could not get deleted due to {e:#?}");
+        tracing::error!("The lib could not get deleted due to {e:#?}");
     }
 
     let still_exists = std::fs::exists(test_path)?;
@@ -64,10 +62,10 @@ fn check_library_default_values() -> Result<()> {
 #[test]
 fn check_library_write_save_and_retrieve() -> Result<()> {
     println!("Start of test");
-    info!("Start of test");
+    tracing::info!("Start of test");
     let path = dirs::data_dir().context("operating system did not provide a data directory")?;
     let test_path = TempDir::new_in(path)?;
-    info!("Data home configured");
+    tracing::info!("Data home configured");
     let mut lib = Library::new().switch_or_create_lib(&test_path.path().to_path_buf())?;
     let lbc = vec![
         LibraryPathConfig::default(),
@@ -79,7 +77,7 @@ fn check_library_write_save_and_retrieve() -> Result<()> {
     if let Some(lib_config) = lib.library_config.as_mut() {
         lib_config.library_paths.push(lbc[1].clone());
     }
-    info!("Pushed lib paths, config is now: {lib:#?}");
+    tracing::info!("Pushed lib paths, config is now: {lib:#?}");
     println!("Pushed lib paths, config is now: {lib:#?}");
     lib.save_config()?;
     let test_lib = Library::new().switch_or_create_lib(&test_path.path().to_path_buf())?;
