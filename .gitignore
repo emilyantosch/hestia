@@ -35,3 +35,5 @@ app/target
 .env
 
 dev_ai/**
+
+.scratch/
