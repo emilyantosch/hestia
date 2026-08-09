@@ -13,15 +13,10 @@ pub struct Icon {
     content_type: IconType,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum IconType {
+    #[default]
     Icon,
     Image,
     Text,
-}
-
-impl Default for IconType {
-    fn default() -> Self {
-        IconType::Icon
-    }
 }

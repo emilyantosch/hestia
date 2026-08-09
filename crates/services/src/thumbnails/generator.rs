@@ -5,22 +5,25 @@ use model::services::thumbnail::{Thumbnail, ThumbnailSize};
 use std::io::Cursor;
 use std::path::Path;
 
+#[derive(Clone, Copy, Debug)]
 pub struct ThumbnailGenerator {
     filter_type: FilterType,
 }
 
 impl ThumbnailGenerator {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             filter_type: FilterType::Lanczos3, // High quality resizing
         }
     }
 
+    #[must_use]
     pub fn with_filter(filter_type: FilterType) -> Self {
         Self { filter_type }
     }
 
-    pub async fn generate_image_thumbnail(
+    pub fn generate_image_thumbnail(
         &self,
         image_data: &[u8],
         size: ThumbnailSize,
@@ -30,8 +33,8 @@ impl ThumbnailGenerator {
 
         let (target_width, target_height) = size.dimensions();
 
-        // Preserve aspect ratio by using thumbnail() instead of resize()
-        let thumbnail = img.thumbnail(target_width, target_height);
+        // `resize` preserves the aspect ratio while honoring the selected filter.
+        let thumbnail = img.resize(target_width, target_height, self.filter_type);
 
         // Encode as PNG for consistent output
         let mut output = Vec::new();
@@ -55,26 +58,25 @@ impl ThumbnailGenerator {
         );
 
         // Detect file type first
-        let file_data = std::fs::read(file_path)
+        let file_data = tokio::fs::read(file_path)
+            .await
             .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
         let mime_type =
             infer::get(&file_data).map_or("application/octet-stream", |kind| kind.mime_type());
 
         match mime_type {
-            mime if mime.starts_with("image/") => {
-                self.generate_image_thumbnail(&file_data, size).await
-            }
-            _ => self.generate_file_icon(mime_type, size).await,
+            mime if mime.starts_with("image/") => self.generate_image_thumbnail(&file_data, size),
+            _ => Self::generate_file_icon(mime_type, size),
         }
     }
 
-    async fn generate_file_icon(&self, mime_type: &str, size: ThumbnailSize) -> Result<Thumbnail> {
+    fn generate_file_icon(mime_type: &str, size: ThumbnailSize) -> Result<Thumbnail> {
         let (width, height) = size.dimensions();
         let mut img = ImageBuffer::new(width, height);
 
         // Generate themed background based on file type
-        let bg_color = self.get_file_type_color(mime_type);
+        let bg_color = Self::get_file_type_color(mime_type);
 
         // Fill background
         for pixel in img.pixels_mut() {
@@ -91,7 +93,7 @@ impl ThumbnailGenerator {
         Ok(Thumbnail::new(size, output, "image/png".to_string()))
     }
 
-    fn get_file_type_color(&self, mime_type: &str) -> Rgba<u8> {
+    fn get_file_type_color(mime_type: &str) -> Rgba<u8> {
         match mime_type {
             mime if mime.starts_with("text/") => Rgba([74, 144, 226, 255]), // Blue
             mime if mime.starts_with("application/pdf") => Rgba([231, 76, 60, 255]), // Red

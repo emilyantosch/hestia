@@ -35,10 +35,12 @@ impl DatabaseManager {
         .await
     }
 
+    #[must_use]
     pub fn get_connection(&self) -> Arc<DatabaseConnection> {
         Arc::clone(&self.connection)
     }
 
+    #[must_use]
     pub fn get_settings(&self) -> &DatabaseSettings {
         &self.settings
     }

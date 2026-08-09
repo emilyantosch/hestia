@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect,
-    QueryTrait, Set, TransactionTrait, TryIntoModel,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, QueryTrait, Set,
+    TransactionTrait, TryIntoModel,
 };
 
 use entity::{prelude::*, thumbnails};
@@ -30,6 +30,7 @@ pub struct ThumbnailOperations {
 }
 
 impl ThumbnailOperations {
+    #[must_use]
     pub fn new(database_manager: Arc<DatabaseManager>) -> Self {
         Self { database_manager }
     }
@@ -209,9 +210,9 @@ impl ThumbnailOperations {
         let db = self.database_manager.get_connection();
 
         // Build the query to find files without thumbnails of the specified size
-        let mut query = entity::files::Entity::find()
+        let mut query = files::Entity::find()
             .filter(
-                entity::files::Column::Id.not_in_subquery(
+                files::Column::Id.not_in_subquery(
                     Thumbnails::find()
                         .select_only()
                         .column(thumbnails::Column::FileId)
@@ -220,7 +221,7 @@ impl ThumbnailOperations {
                 ),
             )
             .select_only()
-            .column(entity::files::Column::Id);
+            .column(files::Column::Id);
 
         if let Some(limit_value) = limit {
             query = query.limit(limit_value);
@@ -244,8 +245,8 @@ impl ThumbnailOperations {
 
         let sizes: Vec<String> = sizes.into_iter().map(|v| v.to_string()).collect();
         // Build the query to find files without thumbnails of the specified size
-        let mut query = entity::files::Entity::find().filter(
-            entity::files::Column::Id.not_in_subquery(
+        let mut query = files::Entity::find().filter(
+            files::Column::Id.not_in_subquery(
                 Thumbnails::find()
                     .select_only()
                     .column(thumbnails::Column::FileId)
@@ -397,9 +398,9 @@ impl ThumbnailOperations {
         let delete_result = Thumbnails::delete_many()
             .filter(
                 thumbnails::Column::FileId.not_in_subquery(
-                    entity::files::Entity::find()
+                    files::Entity::find()
                         .select_only()
-                        .column(entity::files::Column::Id)
+                        .column(files::Column::Id)
                         .into_query(),
                 ),
             )

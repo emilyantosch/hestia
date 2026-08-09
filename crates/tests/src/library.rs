@@ -1,7 +1,5 @@
 use anyhow::{Context, Result, bail};
-use library::library::Library;
-use library::library::LibraryConfig;
-use library::library::LibraryPathConfig;
+use library::library::{Library, LibraryConfig, LibraryPathConfig};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -11,7 +9,7 @@ fn check_delete_library() -> Result<()> {
 
     let path = dirs::data_dir().context("operating system did not provide a data directory")?;
     let test_path = TempDir::new_in(path)?;
-    let lib = Library::new().switch_or_create_lib(&test_path.path().to_path_buf())?;
+    let lib = Library::new().switch_or_create_lib(test_path.path())?;
     tracing::info!("Found or created library to be deleted!");
 
     //Assert that path exists
@@ -34,7 +32,7 @@ fn check_delete_library() -> Result<()> {
 fn check_library_creation_successful() -> Result<()> {
     let path = dirs::data_dir().context("operating system did not provide a data directory")?;
     let test_path = TempDir::new_in(path)?;
-    let lib = Library::new().switch_or_create_lib(&test_path.path().to_path_buf())?;
+    let lib = Library::new().switch_or_create_lib(test_path.path())?;
     match lib.library_config.as_ref() {
         Some(conf) => {
             assert_eq!(conf.library_paths, vec![LibraryPathConfig::default()]);
@@ -51,7 +49,7 @@ fn check_library_creation_successful() -> Result<()> {
 fn check_library_default_values() -> Result<()> {
     let path = dirs::data_dir().context("operating system did not provide a data directory")?;
     let test_path = TempDir::new_in(path)?;
-    let lib = Library::new().switch_or_create_lib(&test_path.path().to_path_buf())?;
+    let lib = Library::new().switch_or_create_lib(test_path.path())?;
     if let Some(lib_config) = lib.library_config.as_ref() {
         assert_eq!(lib_config, &LibraryConfig::default());
     }
@@ -66,21 +64,19 @@ fn check_library_write_save_and_retrieve() -> Result<()> {
     let path = dirs::data_dir().context("operating system did not provide a data directory")?;
     let test_path = TempDir::new_in(path)?;
     tracing::info!("Data home configured");
-    let mut lib = Library::new().switch_or_create_lib(&test_path.path().to_path_buf())?;
-    let lbc = vec![
-        LibraryPathConfig::default(),
-        LibraryPathConfig {
-            name: Some("Hello".to_string()),
-            path: Some(PathBuf::new().join("home/emmi/Documents/")),
-        },
-    ];
+    let mut lib = Library::new().switch_or_create_lib(test_path.path())?;
+    let extra_path = LibraryPathConfig {
+        name: Some("Hello".to_string()),
+        path: Some(PathBuf::new().join("home/emmi/Documents/")),
+    };
+    let lbc = vec![LibraryPathConfig::default(), extra_path.clone()];
     if let Some(lib_config) = lib.library_config.as_mut() {
-        lib_config.library_paths.push(lbc[1].clone());
+        lib_config.library_paths.push(extra_path);
     }
     tracing::info!("Pushed lib paths, config is now: {lib:#?}");
     println!("Pushed lib paths, config is now: {lib:#?}");
     lib.save_config()?;
-    let test_lib = Library::new().switch_or_create_lib(&test_path.path().to_path_buf())?;
+    let test_lib = Library::new().switch_or_create_lib(test_path.path())?;
     if let Some(lib_config) = test_lib.library_config.as_ref() {
         assert_eq!(lib_config.library_paths, lbc);
     }

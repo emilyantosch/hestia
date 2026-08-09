@@ -527,7 +527,6 @@ impl AppController {
         workspace
             .thumbnail_processor
             .queue_missing_files()
-            .await
             .map_err(|error| {
                 ControllerError::operation(ControllerOperation::GenerateThumbnails, error)
             })
@@ -575,8 +574,11 @@ impl AppController {
             }
         });
         for path in paths {
+            let path = CanonPath::try_from(path).map_err(|error| {
+                ControllerError::operation(ControllerOperation::StartWatcher, error)
+            })?;
             watcher_sender
-                .send(FileWatcherMessage::WatchPath(CanonPath::from(path)))
+                .send(FileWatcherMessage::WatchPath(path))
                 .map_err(|error| {
                     ControllerError::operation(ControllerOperation::StartWatcher, error)
                 })?;
@@ -790,7 +792,12 @@ impl AppController {
 impl Workspace {
     async fn open(library: &Library) -> Result<Self> {
         let database_path = library.get_canon_database_path()?;
-        let connection_string = format!("sqlite:///{}", database_path.as_str()?);
+        let connection_string = format!(
+            "sqlite:///{}",
+            database_path
+                .as_str()
+                .context("database path is not valid UTF-8")?
+        );
         let settings = DatabaseSettings {
             con_string: connection_string,
             timeout: 30_000,
@@ -822,7 +829,7 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::{AppController, ControllerError};
-    use anyhow::Result;
+    use anyhow::{Context, Result, bail};
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -851,7 +858,14 @@ mod tests {
         let libraries = controller.list_libraries()?;
 
         assert_eq!(libraries.len(), 1);
-        assert_eq!(libraries.first().unwrap().name().as_str(), "Photos");
+        assert_eq!(
+            libraries
+                .first()
+                .context("the created library was not listed")?
+                .name()
+                .as_str(),
+            "Photos"
+        );
         Ok(())
     }
 
@@ -894,17 +908,25 @@ mod tests {
         let report = controller.scan().await?;
         assert_eq!(report.files_scanned(), 1);
         let folders = controller.list_folders().await?;
-        let files = controller
-            .list_files(Some(folders[0].id()), "notes")
-            .await?;
+        let folder_id = folders
+            .first()
+            .context("the scanned folder was not listed")?
+            .id();
+        let files = controller.list_files(Some(folder_id), "notes").await?;
         assert_eq!(files.len(), 1);
+        let file_id = files
+            .first()
+            .context("the scanned file was not listed")?
+            .id();
 
         controller.create_tag("Important").await?;
         let tags = controller.list_tags().await?;
-        assert_eq!(tags[0].name(), "Important");
-        controller.assign_tag(files[0].id(), tags[0].id()).await?;
-        controller.remove_tag(files[0].id(), tags[0].id()).await?;
-        controller.delete_tag(tags[0].id()).await?;
+        let tag = tags.first().context("the created tag was not listed")?;
+        assert_eq!(tag.name(), "Important");
+        let tag_id = tag.id();
+        controller.assign_tag(file_id, tag_id).await?;
+        controller.remove_tag(file_id, tag_id).await?;
+        controller.delete_tag(tag_id).await?;
         assert!(controller.list_tags().await?.is_empty());
         Ok(())
     }
@@ -914,10 +936,9 @@ mod tests {
         let data_home = TempDir::new()?;
         let controller = AppController::new_in(data_home.path())?;
 
-        let error = controller
-            .initialize_workspace()
-            .await
-            .expect_err("initialization should require a selected library");
+        let Err(error) = controller.initialize_workspace().await else {
+            bail!("initialization should require a selected library");
+        };
 
         assert!(matches!(error, ControllerError::NoLibrarySelected));
         Ok(())
@@ -929,10 +950,9 @@ mod tests {
         let content = TempDir::new()?;
         let controller = AppController::new_in(data_home.path())?;
 
-        let error = controller
-            .create_library("../Photos", content.path())
-            .await
-            .expect_err("library names must not escape the library directory");
+        let Err(error) = controller.create_library("../Photos", content.path()).await else {
+            bail!("library names must not escape the library directory");
+        };
 
         assert!(matches!(error, ControllerError::InvalidLibraryName));
         Ok(())

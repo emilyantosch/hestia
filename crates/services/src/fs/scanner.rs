@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,7 +42,14 @@ pub struct SyncReport {
     pub duration: std::time::Duration,
 }
 
+impl Default for SyncReport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SyncReport {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             files_scanned: 0,
@@ -60,6 +67,7 @@ impl SyncReport {
         }
     }
 
+    #[must_use]
     pub fn total_operations(&self) -> usize {
         self.files_inserted + self.files_updated + self.files_deleted
     }
@@ -74,6 +82,7 @@ pub struct DirectoryScanner {
 
 impl DirectoryScanner {
     /// Create a new directory scanner
+    #[must_use]
     pub fn new(file_operations: Arc<FileOperations>) -> Self {
         Self {
             file_operations,
@@ -82,6 +91,7 @@ impl DirectoryScanner {
     }
 
     /// Create a new directory scanner with custom configuration
+    #[must_use]
     pub fn new_with_config(file_operations: Arc<FileOperations>, config: ScanConfig) -> Self {
         Self {
             file_operations,
@@ -90,6 +100,10 @@ impl DirectoryScanner {
     }
 
     /// Synchronize a directory with the database
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the linear synchronization workflow is clearer in one place"
+    )]
     pub async fn sync_directory(&self, dir_path: &Path) -> Result<SyncReport> {
         let start_time = Instant::now();
         let mut report = SyncReport::new();
@@ -100,7 +114,7 @@ impl DirectoryScanner {
         let db_state = match self.file_operations.get_directory_state(dir_path).await {
             Ok(state) => state,
             Err(e) => {
-                let error_msg = format!("Failed to get database state: {:?}", e);
+                let error_msg = format!("Failed to get database state: {e:?}");
                 report.errors.push(error_msg.clone());
                 return Err(e);
             }
@@ -112,7 +126,7 @@ impl DirectoryScanner {
         let fs_files = match self.scan_filesystem_recursive(dir_path).await {
             Ok(files) => files,
             Err(e) => {
-                let error_msg = format!("Failed to scan filesystem: {:?}", e);
+                let error_msg = format!("Failed to scan filesystem: {e:?}");
                 report.errors.push(error_msg);
                 return Err(e);
             }
@@ -126,11 +140,13 @@ impl DirectoryScanner {
 
         // 3a. Calculate file sync operations
         let mut operations: Vec<SyncOperation> =
-            self.calculate_file_sync_operations(&db_state, fs_files.0);
+            Self::calculate_file_sync_operations(&db_state, fs_files.0);
         tracing::info!("Calculated {} file operations to perform", operations.len());
 
         // 3b. Calculate all sync operations
-        operations.extend(self.calculate_folder_sync_operations(&db_state, fs_files.1));
+        operations.extend(Self::calculate_folder_sync_operations(
+            &db_state, fs_files.1,
+        ));
         tracing::info!(
             "Calculated {} file and folder operations to perform",
             operations.len()
@@ -269,14 +285,13 @@ impl DirectoryScanner {
 
             if path.is_dir() {
                 // Check if directory should be ignored
-                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                    if self
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str())
+                    && self
                         .config
                         .ignore_directories
                         .contains(&dir_name.to_string())
-                    {
-                        continue;
-                    }
+                {
+                    continue;
                 }
 
                 //TODO: Also need to add all of the folders, recurse into them and add all folders
@@ -295,19 +310,18 @@ impl DirectoryScanner {
             } else if path.is_file() {
                 // Check if file should be ignored
                 if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-                    let ext_with_dot = format!(".{}", extension);
+                    let ext_with_dot = format!(".{extension}");
                     if self.config.ignore_extensions.contains(&ext_with_dot) {
                         continue;
                     }
                 }
 
                 // Check file size if limit is set
-                if let Some(max_size) = self.config.max_file_size {
-                    if let Ok(metadata) = fs::metadata(&path).await {
-                        if metadata.len() > max_size {
-                            continue;
-                        }
-                    }
+                if let Some(max_size) = self.config.max_file_size
+                    && let Ok(metadata) = fs::metadata(&path).await
+                    && metadata.len() > max_size
+                {
+                    continue;
                 }
 
                 // Process the file
@@ -325,7 +339,6 @@ impl DirectoryScanner {
 
     /// Calculate what operations need to be performed
     fn calculate_file_sync_operations(
-        &self,
         db_state: &HashMap<PathBuf, FileMetadata>,
         fs_files: Vec<File>,
     ) -> Vec<SyncOperation> {
@@ -354,7 +367,7 @@ impl DirectoryScanner {
         }
 
         // Check for files in database that no longer exist in filesystem
-        for (db_path, _) in db_state {
+        for db_path in db_state.keys() {
             if !processed_paths.contains(db_path) {
                 operations.push(SyncOperation::DeleteFile(db_path.to_owned()));
             }
@@ -363,7 +376,6 @@ impl DirectoryScanner {
     }
 
     fn calculate_folder_sync_operations(
-        &self,
         db_state: &HashMap<PathBuf, FileMetadata>,
         fs_folders: Vec<Folder>,
     ) -> Vec<SyncOperation> {
@@ -392,7 +404,7 @@ impl DirectoryScanner {
         }
 
         // Check for files in database that no longer exist in filesystem
-        for (db_path, _) in db_state {
+        for db_path in db_state.keys() {
             if !processed_paths.contains(db_path) {
                 operations.push(SyncOperation::DeleteFile(db_path.to_owned()));
             }
@@ -416,7 +428,7 @@ impl DirectoryScanner {
                 );
             }
             Err(e) => {
-                let error_msg = format!("Failed to execute insert batch: {:?}", e);
+                let error_msg = format!("Failed to execute insert batch: {e:?}");
                 report.errors.push(error_msg);
                 tracing::error!("Batch insert failed: {:?}", e);
             }
@@ -443,7 +455,7 @@ impl DirectoryScanner {
                 );
             }
             Err(e) => {
-                let error_msg = format!("Failed to execute insert batch: {:?}", e);
+                let error_msg = format!("Failed to execute insert batch: {e:?}");
                 report.errors.push(error_msg);
                 tracing::error!("Batch insert failed: {:?}", e);
             }
@@ -464,7 +476,7 @@ impl DirectoryScanner {
                 tracing::info!("Successfully deleted {} files from database", count);
             }
             Err(e) => {
-                let error_msg = format!("Failed to execute delete batch: {:?}", e);
+                let error_msg = format!("Failed to execute delete batch: {e:?}");
                 report.errors.push(error_msg);
                 tracing::error!("Batch delete failed: {:?}", e);
             }
@@ -488,7 +500,7 @@ impl DirectoryScanner {
                 tracing::info!("Successfully deleted {} files from database", count);
             }
             Err(e) => {
-                let error_msg = format!("Failed to execute delete batch: {:?}", e);
+                let error_msg = format!("Failed to execute delete batch: {e:?}");
                 report.errors.push(error_msg);
                 tracing::error!("Batch delete failed: {:?}", e);
             }
@@ -504,9 +516,9 @@ pub struct ScanConfig {
     pub batch_size: usize,
     /// Whether to scan subdirectories recursively
     pub recursive: bool,
-    /// File extensions to ignore (e.g., [".tmp", ".log"])
+    /// File extensions to ignore (e.g., `.tmp` and `.log`)
     pub ignore_extensions: Vec<String>,
-    /// Directory names to ignore (e.g., [".git", "node_modules"])
+    /// Directory names to ignore (e.g., `.git` and `node_modules`)
     pub ignore_directories: Vec<String>,
     /// Maximum file size to process (in bytes)
     pub max_file_size: Option<u64>,

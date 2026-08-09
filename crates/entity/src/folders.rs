@@ -47,7 +47,7 @@ impl Related<super::file_system_identifier::Entity> for Entity {
 
 #[async_trait]
 impl ActiveModelBehavior for ActiveModel {
-    async fn before_save<C>(mut self, db: &C, insert: bool) -> Result<Self, DbErr>
+    async fn before_save<C>(mut self, _connection: &C, insert: bool) -> Result<Self, DbErr>
     where
         C: ConnectionTrait,
     {

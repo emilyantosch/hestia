@@ -8,14 +8,14 @@ use anyhow::{Context, Result};
 
 use crate::file_id::FileId;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FileHash {
     pub content_hash: Blake3Hash,
     pub identity_hash: Blake3Hash,
     pub file_id: FileId,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FolderHash {
     pub structure_hash: Blake3Hash,
     pub content_hash: Blake3Hash,

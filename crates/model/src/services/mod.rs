@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::{
     fmt,
     path::{Path, PathBuf},

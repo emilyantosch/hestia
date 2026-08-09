@@ -13,6 +13,7 @@ pub enum ThumbnailSize {
 }
 
 impl ThumbnailSize {
+    #[must_use]
     pub const fn dimensions(self) -> (u32, u32) {
         match self {
             Self::Small => (128, 128),
@@ -20,6 +21,7 @@ impl ThumbnailSize {
             Self::Large => (512, 512),
         }
     }
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Small => "small",
@@ -28,10 +30,12 @@ impl ThumbnailSize {
         }
     }
 
+    #[must_use]
     pub const fn all() -> [ThumbnailSize; 3] {
         [Self::Small, Self::Medium, Self::Large]
     }
 
+    #[must_use]
     pub const fn fallback() -> ThumbnailSize {
         Self::Medium
     }
@@ -79,6 +83,7 @@ pub struct Thumbnail {
 }
 
 impl Thumbnail {
+    #[must_use]
     pub fn new(size: ThumbnailSize, data: Vec<u8>, mime_type: String) -> Self {
         let file_size = data.len();
         Self {
@@ -89,31 +94,38 @@ impl Thumbnail {
         }
     }
 
+    #[must_use]
     pub fn with_image_data(size: ThumbnailSize, data: Vec<u8>) -> Self {
         Self::new(size, data, "image/png".to_string())
     }
 
+    #[must_use]
     pub fn size(&self) -> ThumbnailSize {
         self.size
     }
 
+    #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
+    #[must_use]
     pub fn mime_type(&self) -> &str {
         &self.mime_type
     }
 
+    #[must_use]
     pub fn file_size(&self) -> usize {
         self.file_size
     }
 
+    #[must_use]
     pub fn dimensions(&self) -> (u32, u32) {
         self.size.dimensions()
     }
 
-    /// Converts to SeaORM ActiveModel for database insertion
+    /// Converts to `SeaORM` `ActiveModel` for database insertion
+    #[must_use]
     pub fn to_active_model(self, file_id: i32) -> thumbnails::ActiveModel {
         let now = Local::now().naive_local();
 
@@ -129,7 +141,7 @@ impl Thumbnail {
         }
     }
 
-    /// Creates thumbnail from SeaORM Model
+    /// Creates thumbnail from `SeaORM` Model
     pub fn from_model(model: thumbnails::Model) -> Result<Self> {
         let size = ThumbnailSize::try_from(model.size)?;
 
@@ -142,6 +154,7 @@ impl Thumbnail {
     }
 
     /// Returns true if this is an image thumbnail (not a file icon)
+    #[must_use]
     pub fn is_image(&self) -> bool {
         self.mime_type == "image/png" || self.mime_type.starts_with("image/")
     }
@@ -220,9 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn test_thumbnail_seaorm_conversion() {
-        use chrono::Utc;
-
+    fn test_thumbnail_seaorm_conversion() -> Result<()> {
         let original_data = vec![1, 2, 3, 4, 5];
         let size = ThumbnailSize::Small;
         let mime_type = "image/jpeg".to_string();
@@ -254,42 +265,34 @@ mod tests {
         };
 
         // Test from_model
-        let restored_thumbnail = Thumbnail::from_model(model).unwrap();
+        let restored_thumbnail = Thumbnail::from_model(model)?;
         assert_eq!(restored_thumbnail.size(), size);
         assert_eq!(restored_thumbnail.data(), &original_data[..]);
         assert_eq!(restored_thumbnail.mime_type(), &mime_type);
         assert_eq!(restored_thumbnail.file_size(), file_size);
+        Ok(())
     }
 
     #[test]
-    fn test_thumbnail_size_conversions() {
-        // Test TryFrom<&str>
-        assert_eq!(
-            ThumbnailSize::try_from("small").unwrap(),
-            ThumbnailSize::Small
-        );
-        assert_eq!(
-            ThumbnailSize::try_from("medium").unwrap(),
-            ThumbnailSize::Medium
-        );
-        assert_eq!(
-            ThumbnailSize::try_from("large").unwrap(),
-            ThumbnailSize::Large
-        );
-        let error = ThumbnailSize::try_from("invalid")
-            .expect_err("an unsupported thumbnail size should fail");
+    fn test_thumbnail_size_conversions() -> Result<()> {
+        assert_eq!(ThumbnailSize::try_from("small")?, ThumbnailSize::Small);
+        assert_eq!(ThumbnailSize::try_from("medium")?, ThumbnailSize::Medium);
+        assert_eq!(ThumbnailSize::try_from("large")?, ThumbnailSize::Large);
+
+        let Err(error) = ThumbnailSize::try_from("invalid") else {
+            bail!("an unsupported thumbnail size should fail");
+        };
         assert_eq!(error.to_string(), "unsupported thumbnail size: invalid");
 
-        // Test TryFrom<String>
         assert_eq!(
-            ThumbnailSize::try_from("small".to_string()).unwrap(),
+            ThumbnailSize::try_from("small".to_string())?,
             ThumbnailSize::Small
         );
         assert!(ThumbnailSize::try_from("invalid".to_string()).is_err());
 
-        // Test From<ThumbnailSize> for String
         let size_str: String = ThumbnailSize::Medium.into();
         assert_eq!(size_str, "medium");
+        Ok(())
     }
 
     #[test]

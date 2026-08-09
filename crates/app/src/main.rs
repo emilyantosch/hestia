@@ -12,9 +12,10 @@ use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 fn init_tracing() {
-    let filter = std::env::var("RUST_LOG")
-        .map(|_| EnvFilter::from_default_env())
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = std::env::var("RUST_LOG").map_or_else(
+        |_| EnvFilter::new("info"),
+        |_| EnvFilter::from_default_env(),
+    );
     let fmt_layer = fmt::layer()
         .with_target(false)
         .with_thread_ids(true)

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum FileId {
     Inode {
         device_id: u64,
