@@ -310,21 +310,16 @@ mod tests {
     fn test_get_canon_database_path_with_share_path() -> Result<()> {
         let (_temp_dir, lib_path) = setup_test_library()?;
 
-        // Create the directory so canonicalization works
         std::fs::create_dir_all(&lib_path)?;
+        let expected = lib_path.join("db.sqlite");
+        std::fs::File::create(&expected)?;
 
         let mut lib = Library::new();
-        lib.share_path = Some(lib_path.clone());
+        lib.share_path = Some(lib_path);
 
         let db_path = lib.get_canon_database_path()?;
 
-        // FIX: CanonPath canonicalizes the path, but since the db file doesn't exist yet,
-        // it returns an empty path (a limitation of the current CanonPath implementation)
-        // For now, just verify that we can construct it without error
-        assert!(
-            db_path.as_ref().to_string_lossy().contains("db.sqlite")
-                || db_path.as_ref().to_string_lossy().is_empty()
-        );
+        assert_eq!(db_path.as_ref(), expected.canonicalize()?);
         Ok(())
     }
 

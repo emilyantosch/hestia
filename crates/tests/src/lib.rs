@@ -1,1 +1,2 @@
-pub mod library;
+#[cfg(test)]
+mod library;

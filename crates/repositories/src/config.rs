@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-
 use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 
 #[derive(Debug, Clone, Default)]
@@ -10,14 +8,8 @@ pub struct DatabaseSettings {
     pub synchronous: SqliteSynchronous,
 }
 
-#[derive(Serialize, Deserialize)]
-struct EncryptedConfig {
-    encrypted_data: Vec<u8>,
-    nonce: Vec<u8>,
-    salt: Vec<u8>,
-}
-
 impl DatabaseSettings {
+    #[must_use]
     pub fn new(
         con_string: String,
         timeout: u32,

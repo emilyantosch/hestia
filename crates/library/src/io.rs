@@ -115,13 +115,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn setup_test_dir() -> TempDir {
-        TempDir::new().expect("Failed to create temp directory")
+    fn setup_test_dir() -> Result<TempDir> {
+        Ok(TempDir::new()?)
     }
 
     #[test]
     fn test_write_and_read_file() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
         let file_path = temp_dir.path().join("test.txt");
         let content = "Hello, World!";
 
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_ensure_directory_exists_creates_new() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
         let new_dir = temp_dir.path().join("new_directory");
 
         assert!(!new_dir.exists());
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_ensure_directory_exists_with_existing() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
         let existing_dir = temp_dir.path();
 
         // Should not error on existing directory
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_ensure_file_exists_creates_new() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
         let file_path = temp_dir.path().join("new_file.txt");
         let default_content = "default content";
 
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_ensure_file_exists_with_existing() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
         let file_path = temp_dir.path().join("existing_file.txt");
         let original_content = "original";
 
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_ensure_database_file() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
 
         let db_path = ensure_database_file(temp_dir.path())?;
 
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_delete_directory() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
         let dir_to_delete = temp_dir.path().join("to_delete");
 
         ensure_directory_exists(&dir_to_delete)?;
@@ -219,22 +219,25 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_nonexistent_directory_reports_path() {
-        let temp_dir = setup_test_dir();
+    fn test_delete_nonexistent_directory_reports_path() -> Result<()> {
+        let temp_dir = setup_test_dir()?;
         let nonexistent = temp_dir.path().join("does_not_exist");
 
-        let error = delete_directory(&nonexistent).expect_err("missing directory should fail");
+        let Err(error) = delete_directory(&nonexistent) else {
+            bail!("missing directory should fail");
+        };
 
         assert!(
             error
                 .to_string()
                 .contains(&nonexistent.display().to_string())
         );
+        Ok(())
     }
 
     #[test]
     fn test_list_directory_entries() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
 
         // Create some test files and directories
         let file1 = temp_dir.path().join("file1.txt");
@@ -257,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_write_overwrites_existing_file() -> Result<()> {
-        let temp_dir = setup_test_dir();
+        let temp_dir = setup_test_dir()?;
         let file_path = temp_dir.path().join("overwrite.txt");
 
         write_string_to_file(&file_path, "original")?;

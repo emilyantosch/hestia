@@ -3,22 +3,21 @@ use anyhow::{Context, Result};
 use model::services::file::FileSystemFile as File;
 use model::services::thumbnail::ThumbnailSize;
 use repositories::thumbnail::operations::ThumbnailOperations;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::timeout;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ThumbnailJobStatus {
+enum ThumbnailJobStatus {
     Pending,
     Processing,
-    Completed,
     Failed,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ThumbnailJob {
+struct ThumbnailJob {
     pub file_id: i32,
     pub file_path: PathBuf,
     pub size: ThumbnailSize,
@@ -27,8 +26,8 @@ pub(crate) struct ThumbnailJob {
     pub retry_count: u32,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ProcessingStats {
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessingStats {
     pub pending_jobs: usize,
     pub processing_jobs: usize,
     pub completed_jobs: u64,
@@ -64,8 +63,8 @@ pub struct ThumbnailProcessorHandler {
     pub sender: mpsc::UnboundedSender<ThumbnailMessage>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ProcessorConfig {
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessorConfig {
     pub worker_count: usize,
     pub batch_size: usize,
     pub max_retries: u32,
@@ -102,7 +101,7 @@ impl Default for ProcessingStats {
 }
 
 // Worker struct responsible for actual thumbnail generation
-pub struct ThumbnailWorker {
+struct ThumbnailWorker {
     worker_id: usize,
     job_queue: Arc<Mutex<Vec<ThumbnailJob>>>,
     repository: Arc<ThumbnailOperations>,
@@ -112,7 +111,7 @@ pub struct ThumbnailWorker {
 }
 
 impl ThumbnailWorker {
-    pub fn new(
+    fn new(
         worker_id: usize,
         job_queue: Arc<Mutex<Vec<ThumbnailJob>>>,
         repository: Arc<ThumbnailOperations>,
@@ -130,21 +129,20 @@ impl ThumbnailWorker {
         }
     }
 
-    pub async fn run(self, shutdown_signal: Arc<tokio::sync::Notify>) {
+    async fn run(self, shutdown_signal: Arc<tokio::sync::Notify>) {
         tracing::info!("Worker {} started", self.worker_id);
 
         loop {
             tokio::select! {
-                _ = shutdown_signal.notified() => {
+                () = shutdown_signal.notified() => {
                     tracing::info!("Worker {} received shutdown signal", self.worker_id);
                     break;
                 }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if let Some(job) = self.get_next_job().await {
-                        if let Err(e) = self.process_job(job).await {
+                () = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if let Some(job) = self.get_next_job().await
+                        && let Err(e) = self.process_job(job).await {
                             tracing::error!("Worker {} failed to process job: {}", self.worker_id, e);
                         }
-                    }
                 }
             }
         }
@@ -167,14 +165,15 @@ impl ThumbnailWorker {
         None
     }
 
-    async fn process_job(&self, job: ThumbnailJob) -> anyhow::Result<()> {
+    async fn process_job(&self, job: ThumbnailJob) -> Result<()> {
         let start_time = Instant::now();
 
         tracing::debug!(
-            "Worker {} processing thumbnail job for file {} size {:?}",
+            "Worker {} processing thumbnail job for file {} size {:?} after {:?}",
             self.worker_id,
             job.file_id,
-            job.size
+            job.size,
+            job.created_at.elapsed()
         );
 
         // Generate thumbnail with timeout
@@ -206,7 +205,7 @@ impl ThumbnailWorker {
                         // Update stats
                         let mut stats = self.stats.lock().await;
                         stats.completed_jobs += 1;
-                        self.update_avg_processing_time(&mut stats, processing_time);
+                        Self::update_avg_processing_time(&mut stats, processing_time);
                     }
                     Err(e) => {
                         tracing::error!(
@@ -283,7 +282,7 @@ impl ThumbnailWorker {
         }
     }
 
-    fn update_avg_processing_time(&self, stats: &mut ProcessingStats, processing_time: Duration) {
+    fn update_avg_processing_time(stats: &mut ProcessingStats, processing_time: Duration) {
         // Simple moving average calculation
         let current_avg_ms = stats.avg_processing_time.as_millis() as f64;
         let new_time_ms = processing_time.as_millis() as f64;
@@ -300,6 +299,7 @@ impl ThumbnailWorker {
 }
 
 // Processor struct responsible for message handling and coordination
+#[derive(Debug)]
 pub struct ThumbnailProcessor {
     message_receiver: mpsc::UnboundedReceiver<ThumbnailMessage>,
     job_queue: Arc<Mutex<Vec<ThumbnailJob>>>,
@@ -311,6 +311,7 @@ pub struct ThumbnailProcessor {
 }
 
 impl ThumbnailProcessor {
+    #[must_use]
     pub fn new(
         message_receiver: mpsc::UnboundedReceiver<ThumbnailMessage>,
         repository: Arc<ThumbnailOperations>,
@@ -327,6 +328,7 @@ impl ThumbnailProcessor {
         }
     }
 
+    #[must_use]
     pub fn with_config(mut self, config: ProcessorConfig) -> Self {
         self.config = config;
         self
@@ -347,7 +349,7 @@ impl ThumbnailProcessor {
                 Arc::clone(&self.repository),
                 Arc::clone(&self.generator),
                 Arc::clone(&self.stats),
-                self.config.clone(),
+                self.config,
             );
 
             let shutdown_signal = Arc::clone(&self.shutdown_signal);
@@ -358,7 +360,7 @@ impl ThumbnailProcessor {
         }
 
         // Start stats updater task
-        let stats_handle = self.spawn_stats_updater().await;
+        let stats_handle = self.spawn_stats_updater();
 
         // Main message processing loop
         while let Some(message) = self.message_receiver.recv().await {
@@ -431,12 +433,11 @@ impl ThumbnailProcessor {
                             file_id,
                             size
                         );
-                        continue;
                     }
                     Ok(None) => {
                         // Need to generate thumbnail
                         let job = ThumbnailJob {
-                            file_id: file_id,
+                            file_id,
                             file_path: file_info.path.clone(),
                             size,
                             status: ThumbnailJobStatus::Pending,
@@ -454,7 +455,7 @@ impl ThumbnailProcessor {
                         );
                         // Queue anyway to be safe
                         let job = ThumbnailJob {
-                            file_id: file_id,
+                            file_id,
                             file_path: file_info.path.clone(),
                             size,
                             status: ThumbnailJobStatus::Pending,
@@ -473,13 +474,12 @@ impl ThumbnailProcessor {
     }
 
     async fn queue_missing_files(&mut self) -> Result<usize> {
-        let mut queued_jobs = 0;
         let all_thumbnail_sizes = ThumbnailSize::all().to_vec();
         let file_models = self
             .repository
             .get_files_without_thumbnails_sizes(all_thumbnail_sizes, None)
             .await?;
-        let files: Vec<File> = file_models.into_iter().map(|v| v.into()).collect();
+        let files: Vec<File> = file_models.into_iter().map(Into::into).collect();
 
         self.queue_files_for_processing(files, ThumbnailSize::all().to_vec())
             .await
@@ -544,7 +544,7 @@ impl ThumbnailProcessor {
         Ok(())
     }
 
-    async fn spawn_stats_updater(&self) -> tokio::task::JoinHandle<()> {
+    fn spawn_stats_updater(&self) -> tokio::task::JoinHandle<()> {
         let stats = Arc::clone(&self.stats);
         let shutdown_signal = Arc::clone(&self.shutdown_signal);
 
@@ -554,8 +554,8 @@ impl ThumbnailProcessor {
 
             loop {
                 tokio::select! {
-                    _ = shutdown_signal.notified() => break,
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    () = shutdown_signal.notified() => break,
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {
                         let mut stats_guard = stats.lock().await;
                         let now = Instant::now();
                         let elapsed = now.duration_since(last_update).as_secs_f64();
@@ -607,37 +607,30 @@ impl ThumbnailProcessor {
 }
 
 impl ThumbnailProcessorHandler {
+    #[must_use]
     pub fn new() -> (Self, mpsc::UnboundedReceiver<ThumbnailMessage>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         (Self { sender }, receiver)
     }
 
-    pub async fn queue_files(
-        &self,
-        file_infos: Vec<File>,
-        sizes: Vec<ThumbnailSize>,
-    ) -> Result<()> {
+    pub fn queue_files(&self, file_infos: Vec<File>, sizes: Vec<ThumbnailSize>) -> Result<()> {
         self.sender
             .send(ThumbnailMessage::QueueFiles { file_infos, sizes })?;
         Ok(())
     }
 
-    pub async fn queue_missing_files(&self) -> Result<()> {
-        match self.sender.send(ThumbnailMessage::QueueMissingFiles) {
-            Ok(()) => {
-                tracing::info!("Thumbnail tasked with creating missing thumbnails");
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Sending message to creating missing thumbnails failed due to: {e}"
-                );
-                return Err(e)?;
-            }
+    pub fn queue_missing_files(&self) -> Result<()> {
+        if let Err(error) = self.sender.send(ThumbnailMessage::QueueMissingFiles) {
+            tracing::error!(
+                "Sending message to creating missing thumbnails failed due to: {error}"
+            );
+            return Err(error.into());
         }
+        tracing::info!("Thumbnail tasked with creating missing thumbnails");
         Ok(())
     }
 
-    pub async fn queue_single_file(
+    pub fn queue_single_file(
         &self,
         file_id: i32,
         file_path: PathBuf,
@@ -669,7 +662,8 @@ impl ThumbnailProcessorHandler {
         Ok(response.await?)
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
-        Ok(self.sender.send(ThumbnailMessage::Shutdown)?)
+    pub fn shutdown(&self) -> Result<()> {
+        self.sender.send(ThumbnailMessage::Shutdown)?;
+        Ok(())
     }
 }

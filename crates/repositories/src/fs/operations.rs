@@ -34,14 +34,14 @@ pub struct FileMetadata {
 }
 
 /// File information for bulk operations
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct UpsertFileBatchReport {
     pub file_inserted: usize,
     pub file_updated: usize,
 }
 
 /// Folder information for bulk operations
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct UpsertFolderBatchReport {
     pub folder_inserted: usize,
     pub folder_updated: usize,
@@ -56,6 +56,7 @@ pub struct FileRepository {
 }
 
 impl FileRepository {
+    #[must_use]
     pub fn new(database_manager: Arc<DatabaseManager>) -> Self {
         let thumbnail_repository = ThumbnailOperations::new(Arc::clone(&database_manager));
 
@@ -67,6 +68,7 @@ impl FileRepository {
     }
 
     /// Get a reference to the thumbnail repository
+    #[must_use]
     pub fn thumbnail_repository(&self) -> &ThumbnailOperations {
         &self.thumbnail_repository
     }
@@ -114,13 +116,11 @@ impl FileRepository {
         tracing::info!("All library_paths are {library_paths:#?}");
 
         for path in library_paths {
-            match self._upsert_root_folders(&transaction, path).await {
-                Ok(()) => (),
-                Err(e) => {
-                    tracing::error!("The upsert of root folders failed due to {e:#?}");
-                    return Err(e)?;
-                }
-            };
+            self.upsert_root_folder(&transaction, path)
+                .await
+                .inspect_err(|error| {
+                    tracing::error!("The upsert of a root folder failed due to {error:#?}");
+                })?;
         }
         transaction.commit().await?;
         tracing::info!("Transaction committed");
@@ -128,7 +128,7 @@ impl FileRepository {
     }
 
     #[tracing::instrument(skip(transaction), fields(path = %path.display()))]
-    async fn _upsert_root_folders<C>(&self, transaction: &C, path: PathBuf) -> Result<()>
+    async fn upsert_root_folder<C>(&self, transaction: &C, path: PathBuf) -> Result<()>
     where
         C: ConnectionTrait,
     {
@@ -142,37 +142,34 @@ impl FileRepository {
             .get_or_create_file_system_identifier(&path, transaction)
             .await?;
         tracing::info!("Got file system id {file_system_id:#?} for root folder {path:#?}");
-        match possible_root_folder {
-            Some(rf) => {
-                let mut active_rf = rf.into_active_model();
-                active_rf.name = Set(folder_info.name);
-                active_rf.file_system_id = Set(file_system_id);
-                active_rf.parent_folder_id = Set(None);
-                active_rf.content_hash = Set(folder_info.content_hash);
-                active_rf.identity_hash = Set(folder_info.identity_hash);
-                active_rf.structure_hash = Set(folder_info.structure_hash);
+        if let Some(rf) = possible_root_folder {
+            let mut active_rf = rf.into_active_model();
+            active_rf.name = Set(folder_info.name);
+            active_rf.file_system_id = Set(file_system_id);
+            active_rf.parent_folder_id = Set(None);
+            active_rf.content_hash = Set(folder_info.content_hash);
+            active_rf.identity_hash = Set(folder_info.identity_hash);
+            active_rf.structure_hash = Set(folder_info.structure_hash);
 
-                tracing::info!("Updating existing root folder {path:#?}");
-                active_rf.update(transaction).await?;
-            }
-            None => {
-                let new_folder = folders::ActiveModel {
-                    id: sea_orm::ActiveValue::NotSet,
-                    name: Set(folder_info.name),
-                    path: Set(path.to_string_lossy().to_string()),
-                    parent_folder_id: Set(None),
-                    content_hash: Set(folder_info.content_hash),
-                    identity_hash: Set(folder_info.identity_hash),
-                    structure_hash: Set(folder_info.structure_hash),
-                    file_system_id: Set(file_system_id),
-                    created_at: Set(chrono::Local::now().naive_local()),
-                    updated_at: Set(chrono::Local::now().naive_local()),
-                };
+            tracing::info!("Updating existing root folder {path:#?}");
+            active_rf.update(transaction).await?;
+        } else {
+            let new_folder = folders::ActiveModel {
+                id: sea_orm::ActiveValue::NotSet,
+                name: Set(folder_info.name),
+                path: Set(path.to_string_lossy().to_string()),
+                parent_folder_id: Set(None),
+                content_hash: Set(folder_info.content_hash),
+                identity_hash: Set(folder_info.identity_hash),
+                structure_hash: Set(folder_info.structure_hash),
+                file_system_id: Set(file_system_id),
+                created_at: Set(chrono::Local::now().naive_local()),
+                updated_at: Set(chrono::Local::now().naive_local()),
+            };
 
-                tracing::info!("Inserting existing root folder {path:#?}");
-                new_folder.insert(transaction).await?;
-                tracing::info!("Insert of {path:#?} complete!");
-            }
+            tracing::info!("Inserting existing root folder {path:#?}");
+            new_folder.insert(transaction).await?;
+            tracing::info!("Insert of {path:#?} complete!");
         }
         Ok(())
     }
@@ -200,12 +197,11 @@ impl FileRepository {
     where
         C: ConnectionTrait,
     {
-        let root_folders = match transaction {
-            Some(t) => self._find_root_folders(t).await?,
-            None => {
-                let connection = self.database_manager.get_connection();
-                self._find_root_folders(connection.as_ref()).await?
-            }
+        let root_folders = if let Some(transaction) = transaction {
+            Self::find_root_folders_with(transaction).await?
+        } else {
+            let connection = self.database_manager.get_connection();
+            Self::find_root_folders_with(connection.as_ref()).await?
         };
         Ok(root_folders)
     }
@@ -250,18 +246,21 @@ impl FileRepository {
 
         let path_str = folder_path.to_string_lossy().to_string();
 
-        // Get proper content and identity hashes from the FileHash struct
-        let content_hash_str = format!("{:?}", event.hash.as_ref().unwrap().content_hash);
-        let identity_hash_str = format!("{:?}", event.hash.as_ref().unwrap().identity_hash);
-        let structure_hash_str = format!("{:?}", event.hash.as_ref().unwrap().structure_hash);
+        let hash = event
+            .hash
+            .as_ref()
+            .context("cannot upsert a folder event without a hash")?;
+        let content_hash_str = format!("{:?}", hash.content_hash);
+        let identity_hash_str = format!("{:?}", hash.identity_hash);
+        let structure_hash_str = format!("{:?}", hash.structure_hash);
 
         // Get file system identifier
         let file_system_id = self
-            .get_or_create_file_system_identifier(&folder_path, &transaction)
+            .get_or_create_file_system_identifier(folder_path, &transaction)
             .await?;
 
         let parent_folder_id = self
-            .find_parent_folder_id(&folder_path, &transaction)
+            .find_parent_folder_id(folder_path, &transaction)
             .await?;
 
         //  What we actually wanna do is check if the file exists by fsi and/or hash.
@@ -294,8 +293,8 @@ impl FileRepository {
                 identity_hash: Set(identity_hash_str),
                 structure_hash: Set(structure_hash_str),
                 file_system_id: Set(file_system_id),
-                created_at: Set(chrono::Utc::now().naive_utc()),
-                updated_at: Set(chrono::Utc::now().naive_utc()),
+                created_at: Set(Utc::now().naive_utc()),
+                updated_at: Set(Utc::now().naive_utc()),
             };
 
             new_folder.insert(&transaction).await?
@@ -305,7 +304,7 @@ impl FileRepository {
 
         Ok(folder_model)
     }
-    /// Insert or update a file in the database based on FileEvent
+    /// Insert or update a file in the database based on `FileEvent`
     pub async fn upsert_file_from_event(&self, event: &FileEvent) -> Result<files::Model> {
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
@@ -326,16 +325,19 @@ impl FileRepository {
 
         // Get or create file type
         let file_type_id = self
-            .get_or_create_file_type(&file_path, &transaction)
+            .get_or_create_file_type(file_path, &transaction)
             .await?;
 
-        // Get proper content and identity hashes from the FileHash struct
-        let content_hash_str = format!("{:?}", event.hash.as_ref().unwrap().content_hash);
-        let identity_hash_str = format!("{:?}", event.hash.as_ref().unwrap().identity_hash);
+        let hash = event
+            .hash
+            .as_ref()
+            .context("cannot upsert a file event without a hash")?;
+        let content_hash_str = format!("{:?}", hash.content_hash);
+        let identity_hash_str = format!("{:?}", hash.identity_hash);
 
         // Get file system identifier
         let file_system_id = self
-            .get_or_create_file_system_identifier(&file_path, &transaction)
+            .get_or_create_file_system_identifier(file_path, &transaction)
             .await?;
 
         //  What we actually wanna do is check if the file exists by fsi and/or hash.
@@ -366,8 +368,8 @@ impl FileRepository {
                 identity_hash: Set(identity_hash_str),
                 file_type_id: Set(file_type_id),
                 file_system_id: Set(file_system_id),
-                created_at: Set(chrono::Utc::now().naive_utc()),
-                updated_at: Set(chrono::Utc::now().naive_utc()),
+                created_at: Set(Utc::now().naive_utc()),
+                updated_at: Set(Utc::now().naive_utc()),
             };
 
             new_file.insert(&transaction).await?
@@ -479,7 +481,7 @@ impl FileRepository {
 
                     // Default
                     _ => {
-                        return format!("ext_{}", ext_lower);
+                        return format!("ext_{ext_lower}");
                     }
                 }
                 .to_string()
@@ -510,7 +512,7 @@ impl FileRepository {
     /// Get all files in a directory
     pub async fn get_files_in_directory(&self, dir_path: &Path) -> Result<Vec<files::Model>> {
         let dir_str = dir_path.to_string_lossy().to_string();
-        let pattern = format!("{}%", dir_str);
+        let pattern = format!("{dir_str}%");
         let connection = self.database_manager.get_connection();
 
         let files = Files::find()
@@ -637,7 +639,7 @@ impl FileRepository {
 
             // Check if file exists
             let existing_file = Files::find()
-                .filter(files::Column::Path.eq(&file_info.path.to_string_lossy().to_string()))
+                .filter(files::Column::Path.eq(file_info.path.to_string_lossy().to_string()))
                 .one(&transaction)
                 .await?;
 
@@ -649,7 +651,7 @@ impl FileRepository {
                 active_model.identity_hash = Set(file_info.identity_hash);
                 active_model.file_type_id = Set(file_type_id);
                 active_model.file_system_id = Set(file_system_id);
-                active_model.updated_at = Set(chrono::Utc::now().naive_utc());
+                active_model.updated_at = Set(Utc::now().naive_utc());
 
                 active_model.update(&transaction).await?;
                 file_inserted += 1;
@@ -663,8 +665,8 @@ impl FileRepository {
                     identity_hash: Set(file_info.identity_hash),
                     file_type_id: Set(file_type_id),
                     file_system_id: Set(file_system_id),
-                    created_at: Set(chrono::Utc::now().naive_utc()),
-                    updated_at: Set(chrono::Utc::now().naive_utc()),
+                    created_at: Set(Utc::now().naive_utc()),
+                    updated_at: Set(Utc::now().naive_utc()),
                 };
 
                 new_file.insert(&transaction).await?;
@@ -715,7 +717,7 @@ impl FileRepository {
 
             // Check if file exists
             let possible_folder = Folders::find()
-                .filter(folders::Column::Path.eq(&folder_info.path.to_string_lossy().to_string()))
+                .filter(folders::Column::Path.eq(folder_info.path.to_string_lossy().to_string()))
                 .one(&transaction)
                 .await?;
 
@@ -728,7 +730,7 @@ impl FileRepository {
                 existing_folder.structure_hash = Set(folder_info.structure_hash);
                 existing_folder.parent_folder_id = Set(parent_folder_id);
                 existing_folder.file_system_id = Set(file_system_id);
-                existing_folder.updated_at = Set(chrono::Utc::now().naive_utc());
+                existing_folder.updated_at = Set(Utc::now().naive_utc());
 
                 existing_folder.update(&transaction).await?;
                 folder_updated += 1;
@@ -743,8 +745,8 @@ impl FileRepository {
                     structure_hash: Set(folder_info.structure_hash),
                     parent_folder_id: Set(parent_folder_id),
                     file_system_id: Set(file_system_id),
-                    created_at: Set(chrono::Utc::now().naive_utc()),
-                    updated_at: Set(chrono::Utc::now().naive_utc()),
+                    created_at: Set(Utc::now().naive_utc()),
+                    updated_at: Set(Utc::now().naive_utc()),
                 };
 
                 new_folder.insert(&transaction).await?;
@@ -801,7 +803,7 @@ impl FileRepository {
     }
 
     /// Clear file type cache (useful for testing or cache invalidation)
-    pub async fn clear_file_type_cache(&self) {
+    pub fn clear_file_type_cache(&self) {
         self.file_type_cache
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -961,14 +963,18 @@ impl FileRepository {
         let mut folder_condition: Condition = Condition::any();
         let mut tag_condition: Condition = Condition::all();
         match (filter.tag_filter.as_ref(), filter.folder_filter.as_ref()) {
-            (Some(tf), Some(ff)) => {
-                folder_condition = self.get_folder_filter_condition(ff)?;
-                tag_condition = self.get_tag_filter_condition(tf)?;
+            (Some(tag_filter), Some(folder_filter)) => {
+                folder_condition = Self::get_folder_filter_condition(folder_filter);
+                tag_condition = Self::get_tag_filter_condition(tag_filter);
             }
-            (Some(tf), None) => tag_condition = self.get_tag_filter_condition(tf)?,
-            (None, Some(ff)) => folder_condition = self.get_folder_filter_condition(ff)?,
+            (Some(tag_filter), None) => {
+                tag_condition = Self::get_tag_filter_condition(tag_filter);
+            }
+            (None, Some(folder_filter)) => {
+                folder_condition = Self::get_folder_filter_condition(folder_filter);
+            }
             (None, None) => (),
-        };
+        }
         let files = Files::find()
             .left_join(file_has_tags::Entity)
             .filter(folder_condition)
@@ -978,25 +984,24 @@ impl FileRepository {
         Ok(files)
     }
 
-    fn get_folder_filter_condition(&self, ff: &FolderFilter) -> Result<Condition> {
-        let mut folder_condition = Condition::any();
-        for folder in &ff.folders {
-            folder_condition = folder_condition.add(
-                files::Column::Path.like(format!("{}%", folder.to_string_lossy().to_string())),
-            );
+    fn get_folder_filter_condition(filter: &FolderFilter) -> Condition {
+        let mut condition = Condition::any();
+        for folder in &filter.folders {
+            condition =
+                condition.add(files::Column::Path.like(format!("{}%", folder.to_string_lossy())));
         }
-        Ok(folder_condition)
+        condition
     }
 
-    fn get_tag_filter_condition(&self, tf: &TagFilter) -> Result<Condition> {
-        let mut tag_condition = Condition::all();
-        for tag in &tf.tags {
-            tag_condition = tag_condition.add(file_has_tags::Column::TagId.eq(tag.id));
+    fn get_tag_filter_condition(filter: &TagFilter) -> Condition {
+        let mut condition = Condition::all();
+        for tag in &filter.tags {
+            condition = condition.add(file_has_tags::Column::TagId.eq(tag.id));
         }
-        Ok(tag_condition)
+        condition
     }
 
-    async fn _find_root_folders<C>(&self, transaction: &C) -> Result<Vec<folders::Model>>
+    async fn find_root_folders_with<C>(transaction: &C) -> Result<Vec<folders::Model>>
     where
         C: ConnectionTrait,
     {

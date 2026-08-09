@@ -83,11 +83,19 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // Drop indexes first
         manager
-            .drop_index(Index::drop().name("idx_tag_has_tags_unique_super_sub").to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx_tag_has_tags_unique_super_sub")
+                    .to_owned(),
+            )
             .await?;
 
         manager
-            .drop_index(Index::drop().name("idx_tag_has_tags_id_super_sub").to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx_tag_has_tags_id_super_sub")
+                    .to_owned(),
+            )
             .await?;
 
         // Drop TagHasTags table (foreign keys will be dropped automatically)
