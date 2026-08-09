@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ThumbnailJobStatus {
@@ -132,25 +131,25 @@ impl ThumbnailWorker {
     }
 
     pub async fn run(self, shutdown_signal: Arc<tokio::sync::Notify>) {
-        info!("Worker {} started", self.worker_id);
+        tracing::info!("Worker {} started", self.worker_id);
 
         loop {
             tokio::select! {
                 _ = shutdown_signal.notified() => {
-                    info!("Worker {} received shutdown signal", self.worker_id);
+                    tracing::info!("Worker {} received shutdown signal", self.worker_id);
                     break;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
                     if let Some(job) = self.get_next_job().await {
                         if let Err(e) = self.process_job(job).await {
-                            error!("Worker {} failed to process job: {}", self.worker_id, e);
+                            tracing::error!("Worker {} failed to process job: {}", self.worker_id, e);
                         }
                     }
                 }
             }
         }
 
-        info!("Worker {} stopped", self.worker_id);
+        tracing::info!("Worker {} stopped", self.worker_id);
     }
 
     async fn get_next_job(&self) -> Option<ThumbnailJob> {
@@ -171,9 +170,11 @@ impl ThumbnailWorker {
     async fn process_job(&self, job: ThumbnailJob) -> anyhow::Result<()> {
         let start_time = Instant::now();
 
-        debug!(
+        tracing::debug!(
             "Worker {} processing thumbnail job for file {} size {:?}",
-            self.worker_id, job.file_id, job.size
+            self.worker_id,
+            job.file_id,
+            job.size
         );
 
         // Generate thumbnail with timeout
@@ -208,9 +209,10 @@ impl ThumbnailWorker {
                         self.update_avg_processing_time(&mut stats, processing_time);
                     }
                     Err(e) => {
-                        error!(
+                        tracing::error!(
                             "Worker {} failed to save thumbnail to database: {}",
-                            self.worker_id, e
+                            self.worker_id,
+                            e
                         );
                         self.handle_failed_job(job).await;
                         return Err(e);
@@ -218,17 +220,20 @@ impl ThumbnailWorker {
                 }
             }
             Ok(Err(e)) => {
-                warn!(
+                tracing::warn!(
                     "Worker {} failed to generate thumbnail for file {}: {}",
-                    self.worker_id, job.file_id, e
+                    self.worker_id,
+                    job.file_id,
+                    e
                 );
                 self.handle_failed_job(job).await;
                 return Err(e);
             }
             Err(_) => {
-                error!(
+                tracing::error!(
                     "Worker {} thumbnail generation timed out for file {}",
-                    self.worker_id, job.file_id
+                    self.worker_id,
+                    job.file_id
                 );
                 self.handle_failed_job(job).await;
                 anyhow::bail!("worker {} thumbnail generation timed out", self.worker_id);
@@ -246,9 +251,11 @@ impl ThumbnailWorker {
             job.status = ThumbnailJobStatus::Pending;
 
             let delay = self.config.retry_delay * job.retry_count; // Exponential backoff
-            info!(
+            tracing::info!(
                 "Worker {} retrying failed job (attempt {}/{})",
-                self.worker_id, job.retry_count, self.config.max_retries
+                self.worker_id,
+                job.retry_count,
+                self.config.max_retries
             );
 
             tokio::spawn({
@@ -326,7 +333,7 @@ impl ThumbnailProcessor {
     }
 
     pub async fn run(mut self) -> Result<()> {
-        info!(
+        tracing::info!(
             "Starting ThumbnailProcessor with {} workers",
             self.config.worker_count
         );
@@ -378,7 +385,7 @@ impl ThumbnailProcessor {
                     let _ = respond_to.send(count);
                 }
                 ThumbnailMessage::Shutdown => {
-                    info!("Shutdown signal received, stopping processor");
+                    tracing::info!("Shutdown signal received, stopping processor");
                     break;
                 }
             }
@@ -390,16 +397,16 @@ impl ThumbnailProcessor {
         // Wait for all workers to complete
         for handle in worker_handles {
             if let Err(e) = handle.await {
-                error!("Worker task failed: {}", e);
+                tracing::error!("Worker task failed: {}", e);
             }
         }
 
         // Stop stats updater
         if let Err(e) = stats_handle.await {
-            error!("Stats updater task failed: {}", e);
+            tracing::error!("Stats updater task failed: {}", e);
         }
 
-        info!("ThumbnailProcessor stopped successfully");
+        tracing::info!("ThumbnailProcessor stopped successfully");
         Ok(())
     }
 
@@ -419,9 +426,10 @@ impl ThumbnailProcessor {
                 // Check if thumbnail already exists
                 match self.repository.get_by_file_and_size(file_id, size).await {
                     Ok(Some(_)) => {
-                        debug!(
+                        tracing::debug!(
                             "Thumbnail already exists for file {} size {:?}",
-                            file_id, size
+                            file_id,
+                            size
                         );
                         continue;
                     }
@@ -439,9 +447,10 @@ impl ThumbnailProcessor {
                         queued_count += 1;
                     }
                     Err(e) => {
-                        warn!(
+                        tracing::warn!(
                             "Failed to check existing thumbnail for file {}: {}",
-                            file_id, e
+                            file_id,
+                            e
                         );
                         // Queue anyway to be safe
                         let job = ThumbnailJob {
@@ -459,7 +468,7 @@ impl ThumbnailProcessor {
             }
         }
 
-        info!("Queued {} thumbnail generation jobs", queued_count);
+        tracing::info!("Queued {} thumbnail generation jobs", queued_count);
         Ok(queued_count)
     }
 
@@ -485,9 +494,10 @@ impl ThumbnailProcessor {
         // Check if thumbnail already exists
         match self.repository.get_by_file_and_size(file_id, size).await {
             Ok(Some(_)) => {
-                debug!(
+                tracing::debug!(
                     "Thumbnail already exists for file {} size {:?}",
-                    file_id, size
+                    file_id,
+                    size
                 );
                 return Ok(());
             }
@@ -504,15 +514,17 @@ impl ThumbnailProcessor {
 
                 let mut queue = self.job_queue.lock().await;
                 queue.push(job);
-                info!(
+                tracing::info!(
                     "Queued single thumbnail job for file {} size {:?}",
-                    file_id, size
+                    file_id,
+                    size
                 );
             }
             Err(e) => {
-                warn!(
+                tracing::warn!(
                     "Failed to check existing thumbnail for file {}: {}",
-                    file_id, e
+                    file_id,
+                    e
                 );
                 // Queue anyway to be safe
                 let job = ThumbnailJob {
@@ -613,10 +625,12 @@ impl ThumbnailProcessorHandler {
     pub async fn queue_missing_files(&self) -> Result<()> {
         match self.sender.send(ThumbnailMessage::QueueMissingFiles) {
             Ok(()) => {
-                info!("Thumbnail tasked with creating missing thumbnails");
+                tracing::info!("Thumbnail tasked with creating missing thumbnails");
             }
             Err(e) => {
-                error!("Sending message to creating missing thumbnails failed due to: {e}");
+                tracing::error!(
+                    "Sending message to creating missing thumbnails failed due to: {e}"
+                );
                 return Err(e)?;
             }
         }

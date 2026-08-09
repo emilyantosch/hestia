@@ -18,7 +18,6 @@ use sea_orm::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use tracing::{info, instrument};
 
 use crate::manager::DatabaseManager;
 use crate::thumbnail::operations::ThumbnailOperations;
@@ -128,7 +127,7 @@ impl FileRepository {
         Ok(())
     }
 
-    #[instrument(skip(transaction), fields(path = %path.display()))]
+    #[tracing::instrument(skip(transaction), fields(path = %path.display()))]
     async fn _upsert_root_folders<C>(&self, transaction: &C, path: PathBuf) -> Result<()>
     where
         C: ConnectionTrait,
@@ -603,7 +602,7 @@ impl FileRepository {
             let wf = WatchedFolderTree::with(folder.name, folder.path, children_array, None, None);
             map.insert(folder.id.to_string(), wf);
         }
-        info!("Complete map {map:#?}");
+        tracing::info!("Complete map {map:#?}");
         Ok(map)
     }
 

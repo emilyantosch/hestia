@@ -1,20 +1,18 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use events::{FileEvent, FolderEvent};
 use hash::hash::{FileHash, FolderHash};
 use model::services::CanonPath;
 use notify::event::{CreateKind, EventKind, RemoveKind};
-use notify::{Error, RecommendedWatcher, RecursiveMode};
+use notify::{Error, RecommendedWatcher};
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
 use repositories::fs::operations::FileRepository as FileOperations;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
+use tokio::sync::mpsc::{self, Sender, UnboundedSender};
 use tokio::sync::{Mutex, oneshot};
-use tracing::{error, info, warn};
 
 #[derive(Debug)]
 pub struct FSEvent {
@@ -71,7 +69,7 @@ pub struct TestFileWatcherEventHandler {
 #[async_trait::async_trait]
 impl FileWatcherEventHandler for TestFileWatcherEventHandler {
     async fn handle_event(&self, event: FSEvent) -> Result<()> {
-        info!("FileWatcher is sending event to test pipeline");
+        tracing::info!("FileWatcher is sending event to test pipeline");
         let sender = self.sender.lock().await;
         sender.send(event)?;
         Ok(())
@@ -96,7 +94,7 @@ pub enum FileWatcherMessage {
 pub struct FileWatcher {
     watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
     pub message_receiver: mpsc::UnboundedReceiver<FileWatcherMessage>,
-    watched_paths: Option<HashSet<CanonPath>>,
+    watched_paths: HashSet<CanonPath>,
 }
 
 impl FileWatcher {
@@ -115,7 +113,7 @@ impl FileWatcher {
                 let r_tx_clone = r_tx.clone();
                 rt.spawn(async move {
                     if let Err(e) = r_tx_clone.send(result).await {
-                        info!("Error sending event result: {:?}", e);
+                        tracing::info!("Error sending event result: {:?}", e);
                     };
                 });
             },
@@ -127,12 +125,12 @@ impl FileWatcher {
                     Ok(events) => {
                         for event in events {
                             if let Err(e) = to_file_or_folder_event_and_send(event, &p_tx).await {
-                                error!("Failed to process event: {:?}", e);
+                                tracing::error!("Failed to process event: {:?}", e);
                             }
                         }
                     }
                     Err(e) => {
-                        error!("errors: {:?}", e);
+                        tracing::error!("errors: {:?}", e);
                     }
                 }
             }
@@ -141,17 +139,17 @@ impl FileWatcher {
         tokio::spawn(async move {
             while let Some(event) = p_rx.recv().await {
                 if let Err(e) = event_handler.handle_event(event).await {
-                    error!("Failed to store event to database: {:?}", e);
+                    tracing::error!("Failed to store event to database: {:?}", e);
                 }
             }
         });
 
         match debouncer {
             Ok(watcher) => {
-                info!("Init of FileWatcher completed successfully!");
+                tracing::info!("Init of FileWatcher completed successfully!");
                 self.watcher = Some(watcher);
             }
-            Err(e) => error!("{:?}", e),
+            Err(e) => tracing::error!("{:?}", e),
         };
         Ok(())
     }
@@ -160,7 +158,7 @@ impl FileWatcher {
         Self {
             watcher: None,
             message_receiver,
-            watched_paths: None,
+            watched_paths: HashSet::new(),
         }
     }
 
@@ -169,71 +167,23 @@ impl FileWatcher {
         while let Some(res) = self.message_receiver.recv().await {
             match res {
                 FileWatcherMessage::WatchPath(path) => {
-                    match self.watch(path).await {
-                        Ok(()) => info!("Path is being watched successfully"),
-                        Err(e) => error!("The path could not be watched due to: {e:#?}"),
-                    };
+                    self.watched_paths.insert(path);
                 }
                 FileWatcherMessage::UnwatchPath(path) => {
-                    self.unwatch(path).await?;
+                    self.watched_paths.remove(&path);
                 }
-                FileWatcherMessage::GetWatchPaths(sender) => match self.watched_paths.as_ref() {
-                    Some(paths) => {
-                        let _ = sender.send(paths.to_owned());
-                    }
-                    None => (),
-                },
+                FileWatcherMessage::GetWatchPaths(sender) => {
+                    let paths = self.watched_paths.clone();
+                    drop(sender.send(paths));
+                }
             }
+            self.watch();
         }
         Ok(())
     }
 
-    pub async fn unwatch(&mut self, path: CanonPath) -> Result<()> {
-        let path_display = path.as_str()?.to_string();
-        let watched_paths = self
-            .watched_paths
-            .as_mut()
-            .context("cannot unwatch a path before any paths have been watched")?;
-
-        ensure!(
-            watched_paths.remove(&path),
-            "path {path_display} is not being watched"
-        );
-        Ok(())
-    }
-
-    //FIXME: This function works. However, the configuration of the paths will need to be
-    //controlled, since each library/configuration will need a root folder. Each folder path that
-    //is watched by the watcher is not added to the database and therefore needs to get added
-    //separately. This is true for each folder added to watcher, but also changes based on the
-    //library that is currently being looked at. I assume we want to use different db files for
-    //different vault configs.
-    pub async fn watch(&mut self, path: CanonPath) -> Result<()> {
-        ensure!(
-            path.try_exists()
-                .with_context(|| format!("failed to inspect watch path {path:?}"))?,
-            "watch path {path:?} does not exist"
-        );
-        if let Some(watcher) = self.watcher.as_mut() {
-            watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
-        }
-        match self.watched_paths.as_mut() {
-            Some(paths) => {
-                if !paths.insert(path.to_owned()) {
-                    warn!(
-                        "Trying to add the same path twice to the watch list. No change to the watch list committed"
-                    );
-                }
-            }
-            None => {
-                let mut hs = HashSet::new();
-                hs.insert(path.to_owned());
-                self.watched_paths = Some(hs);
-            }
-        }
-        info!("Watching path: {path:#?}");
-
-        Ok(())
+    fn watch(&self) {
+        todo!()
     }
 
     async fn to_database(event: FSEvent, db_operations: &FileOperations) -> Result<()> {
@@ -243,13 +193,14 @@ impl FileWatcher {
                     // File was created or modified, insert/update in database
                     match db_operations.upsert_file_from_event(&file_event).await {
                         Ok(file_model) => {
-                            info!(
+                            tracing::info!(
                                 "Successfully stored file: {} (ID: {})",
-                                file_model.path, file_model.id
+                                file_model.path,
+                                file_model.id
                             );
                         }
                         Err(e) => {
-                            error!("Failed to upsert file: {:?}", e);
+                            tracing::error!("Failed to upsert file: {:?}", e);
                             return Err(e)?;
                         }
                     }
@@ -257,23 +208,23 @@ impl FileWatcher {
                 EventKind::Remove(_) => {
                     // File was deleted, remove from database
                     for path in &file_event.paths {
-                        info!("File with path {path:#?} is getting removed from db");
+                        tracing::info!("File with path {path:#?} is getting removed from db");
                         match db_operations.delete_file_by_path(path).await {
                             Ok(deleted) => {
                                 if deleted {
-                                    info!(
+                                    tracing::info!(
                                         "Successfully removed file from database: {}",
                                         path.display()
                                     );
                                 } else {
-                                    info!(
+                                    tracing::info!(
                                         "File not found in database (already removed?): {}",
                                         path.display()
                                     );
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to delete file from database: {:?}", e);
+                                tracing::error!("Failed to delete file from database: {:?}", e);
                                 return Err(e)?;
                             }
                         }
@@ -281,7 +232,7 @@ impl FileWatcher {
                 }
                 _ => {
                     // Other event types (e.g., access) - we might not need to handle these
-                    info!("Ignoring event type: {:?}", file_event.kind);
+                    tracing::info!("Ignoring event type: {:?}", file_event.kind);
                 }
             }
         } else if let Some(folder_event) = event.folder_event {
@@ -290,13 +241,14 @@ impl FileWatcher {
                     // File was created or modified, insert/update in database
                     match db_operations.upsert_folder_from_event(&folder_event).await {
                         Ok(folder_model) => {
-                            info!(
+                            tracing::info!(
                                 "Successfully stored file: {} (ID: {})",
-                                folder_model.path, folder_model.id
+                                folder_model.path,
+                                folder_model.id
                             );
                         }
                         Err(e) => {
-                            error!("Failed to upsert file: {:?}", e);
+                            tracing::error!("Failed to upsert file: {:?}", e);
                             return Err(e)?;
                         }
                     }
@@ -307,19 +259,19 @@ impl FileWatcher {
                         match db_operations.delete_folder_by_path(path).await {
                             Ok(deleted) => {
                                 if deleted {
-                                    info!(
+                                    tracing::info!(
                                         "Successfully removed file from database: {}",
                                         path.display()
                                     );
                                 } else {
-                                    info!(
+                                    tracing::info!(
                                         "File not found in database (already removed?): {}",
                                         path.display()
                                     );
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to delete file from database: {:?}", e);
+                                tracing::error!("Failed to delete file from database: {:?}", e);
                                 return Err(e)?;
                             }
                         }
@@ -327,7 +279,7 @@ impl FileWatcher {
                 }
                 _ => {
                     // Other event types (e.g., access) - we might not need to handle these
-                    info!("Ignoring event type: {:?}", folder_event.kind);
+                    tracing::info!("Ignoring event type: {:?}", folder_event.kind);
                 }
             }
         } else {
@@ -346,17 +298,17 @@ async fn to_file_or_folder_event_and_send(
         .last()
         .context("watcher event does not contain a path")?;
 
-    info!("Deciding handling based on event type for {event:#?}");
+    tracing::info!("Deciding handling based on event type for {event:#?}");
     match (path.is_dir(), event.kind) {
         (true, _)
         | (false, EventKind::Create(CreateKind::Folder))
         | (false, EventKind::Remove(RemoveKind::Folder)) => {
-            info!("{event:#?} is folder event");
+            tracing::info!("{event:#?} is folder event");
             to_folder_event_and_send(event, processed_event_tx).await?;
         }
         (_, EventKind::Access(_)) => return Ok(()),
         (false, _) => {
-            info!("{event:#?} is file event");
+            tracing::info!("{event:#?} is file event");
             to_file_event_and_send(event, processed_event_tx).await?;
         }
     }
@@ -370,8 +322,8 @@ async fn to_file_event_and_send(
     let kind = event.kind;
     let paths = event.paths.to_owned();
     let mut hash: Option<FileHash> = None;
-    info!("The following paths are involved in the file event: {paths:#?}");
-    info!("The event kind is {kind:#?}");
+    tracing::info!("The following paths are involved in the file event: {paths:#?}");
+    tracing::info!("The event kind is {kind:#?}");
     if kind != EventKind::Remove(RemoveKind::File) {
         hash = Some(
             FileHash::hash(
@@ -389,12 +341,12 @@ async fn to_file_event_and_send(
         paths,
         hash,
     };
-    info!("Constructed FileEvent from Raw Stream");
+    tracing::info!("Constructed FileEvent from Raw Stream");
 
     if let Err(e) = processed_event_tx.send(file_event.into()).await {
-        info!("Error sending processed event into channel: {e:#?}");
+        tracing::info!("Error sending processed event into channel: {e:#?}");
     } else {
-        info!("Sending processed event successful")
+        tracing::info!("Sending processed event successful")
     }
     Ok(())
 }
@@ -406,8 +358,8 @@ async fn to_folder_event_and_send(
     let kind = event.kind;
     let paths = event.paths.to_owned();
     let mut hash = None;
-    info!("The following paths are involved in the file event: {paths:#?}");
-    info!("The event kind is {kind:#?}");
+    tracing::info!("The following paths are involved in the file event: {paths:#?}");
+    tracing::info!("The event kind is {kind:#?}");
     if kind != EventKind::Remove(RemoveKind::Folder) {
         hash = Some(
             FolderHash::hash(
@@ -425,12 +377,12 @@ async fn to_folder_event_and_send(
         paths,
         hash,
     };
-    info!("Constructed FileEvent from Raw Stream");
+    tracing::info!("Constructed FileEvent from Raw Stream");
 
     if let Err(e) = processed_event_tx.send(folder_event.into()).await {
-        info!("Error sending processed event into channel: {e:#?}");
+        tracing::info!("Error sending processed event into channel: {e:#?}");
     } else {
-        info!("Sending processed event successful")
+        tracing::info!("Sending processed event successful")
     }
     Ok(())
 }

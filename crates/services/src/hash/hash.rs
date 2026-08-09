@@ -3,7 +3,6 @@ use blake3::{Hash as Blake3Hash, Hasher};
 use std::collections::BTreeMap;
 use std::path::Path;
 use tokio::fs as async_fs;
-use tracing::info;
 
 use anyhow::{Context, Result};
 
@@ -26,7 +25,7 @@ pub struct FolderHash {
 
 impl FileHash {
     pub async fn hash(path: &Path) -> Result<FileHash> {
-        info!("Trying to extract file id for {path:#?}");
+        tracing::info!("Trying to extract file id for {path:#?}");
         let file_id = FileId::extract(path).await?;
 
         let content_hash = Self::hash_file_content(path).await?;

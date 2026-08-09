@@ -417,12 +417,15 @@ impl AppController {
             .and_then(|value| value.to_str())
             .unwrap_or("Folder")
             .to_string();
-        let mut config = LibraryConfig::default();
-        config.name = name.to_string();
-        config.library_paths = vec![LibraryPathConfig {
-            name: Some(content_name),
-            path: Some(content_path),
-        }];
+
+        let config = LibraryConfig {
+            name: name.to_string(),
+            library_paths: vec![LibraryPathConfig {
+                name: Some(content_name),
+                path: Some(content_path),
+            }],
+            ..Default::default()
+        };
 
         let mut library = Library::new_in(&self.data_home);
         library.share_path = Some(share_path);
@@ -848,7 +851,7 @@ mod tests {
         let libraries = controller.list_libraries()?;
 
         assert_eq!(libraries.len(), 1);
-        assert_eq!(libraries[0].name().as_str(), "Photos");
+        assert_eq!(libraries.first().unwrap().name().as_str(), "Photos");
         Ok(())
     }
 

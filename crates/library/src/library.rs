@@ -11,21 +11,11 @@ use model::services::{CanonPath, decorations};
 
 use crate::io;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Library {
     pub share_path: Option<PathBuf>,
     pub library_config: Option<LibraryConfig>,
     data_home: Option<PathBuf>,
-}
-
-impl Default for Library {
-    fn default() -> Self {
-        Self {
-            share_path: None,
-            library_config: None,
-            data_home: None,
-        }
-    }
 }
 
 impl Drop for Library {
@@ -96,9 +86,8 @@ impl Library {
 
     /// Save the current library path to disk for restoration in future sessions
     pub fn save_last(&self) -> Result<()> {
-        let path = match self.share_path.as_ref() {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some(path) = self.share_path.as_ref() else {
+            return Ok(());
         };
 
         let last_library = LastLibrary {
@@ -133,12 +122,11 @@ impl Library {
 
     /// Return the last library or create a new one if none exists
     pub fn last_or_new() -> Library {
-        match Self::last() {
-            Ok(lib) => lib,
-            Err(_) => {
-                tracing::info!("Could not find old library, creating new one");
-                Self::new()
-            }
+        if let Ok(lib) = Self::last() {
+            lib
+        } else {
+            tracing::info!("Could not find last used library, creating new one");
+            Self::new()
         }
     }
 
@@ -150,7 +138,7 @@ impl Library {
             .context("cannot get database path before selecting a library")?
             .join("db.sqlite");
 
-        Ok(CanonPath::from(db_path))
+        CanonPath::try_from(db_path)
     }
 
     /// Save the config to disk
@@ -284,10 +272,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn setup_test_library() -> (TempDir, PathBuf) {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    fn setup_test_library() -> Result<(TempDir, PathBuf)> {
+        let temp_dir = TempDir::new()?;
         let lib_path = temp_dir.path().join("test_library");
-        (temp_dir, lib_path)
+        Ok((temp_dir, lib_path))
     }
 
     #[test]
@@ -320,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_get_canon_database_path_with_share_path() -> Result<()> {
-        let (_temp_dir, lib_path) = setup_test_library();
+        let (_temp_dir, lib_path) = setup_test_library()?;
 
         // Create the directory so canonicalization works
         std::fs::create_dir_all(&lib_path)?;

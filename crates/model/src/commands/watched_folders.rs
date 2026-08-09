@@ -10,6 +10,7 @@ pub struct WatchedFolderTree {
 }
 
 impl WatchedFolderTree {
+    #[must_use]
     pub fn new(name: String, path: String) -> WatchedFolderTree {
         WatchedFolderTree {
             name,
@@ -20,6 +21,7 @@ impl WatchedFolderTree {
         }
     }
 
+    #[must_use]
     pub fn with_icon_and_color(
         name: String,
         path: String,
@@ -35,6 +37,7 @@ impl WatchedFolderTree {
         }
     }
 
+    #[must_use]
     pub fn with(
         name: String,
         path: String,
@@ -51,16 +54,19 @@ impl WatchedFolderTree {
         }
     }
 
+    #[must_use]
     pub fn children(mut self, children: Vec<String>) -> Self {
         self.children = Some(children);
         self
     }
 
+    #[must_use]
     pub fn icon(mut self, icon: String) -> Self {
         self.icon = Some(icon);
         self
     }
 
+    #[must_use]
     pub fn color(mut self, color: String) -> Self {
         self.color = Some(color);
         self
