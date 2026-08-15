@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use hash::hash::{FileHash, FolderHash};
+use hash::hash::FolderHash;
+use hash::{ContentDigest, FilesystemObjectId};
 use notify::EventKind;
 use notify_debouncer_full::DebouncedEvent;
 
@@ -9,7 +10,8 @@ pub struct FileEvent {
     pub event: DebouncedEvent,
     pub paths: Vec<PathBuf>,
     pub kind: EventKind,
-    pub hash: Option<FileHash>,
+    pub content_digest: Option<ContentDigest>,
+    pub filesystem_object_id: Option<FilesystemObjectId>,
 }
 
 #[derive(Debug)]

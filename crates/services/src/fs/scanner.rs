@@ -352,8 +352,8 @@ impl DirectoryScanner {
             match db_state.get(&fs_file.path) {
                 Some(db_metadata) => {
                     // File exists in database, check if it needs updating
-                    if db_metadata.content_hash != fs_file.content_hash
-                        || db_metadata.identity_hash != fs_file.identity_hash
+                    if db_metadata.content_digest != fs_file.content_digest
+                        || db_metadata.filesystem_object_id != fs_file.filesystem_object_id
                     {
                         operations.push(SyncOperation::UpdateFile(fs_file));
                     }
@@ -387,15 +387,7 @@ impl DirectoryScanner {
             processed_paths.insert(fs_folder.path.clone());
 
             match db_state.get(&fs_folder.path) {
-                Some(db_metadata) => {
-                    // File exists in database, check if it needs updating
-                    if db_metadata.content_hash != fs_folder.content_hash
-                        || db_metadata.identity_hash != fs_folder.identity_hash
-                    {
-                        operations.push(SyncOperation::UpdateFolder(fs_folder));
-                    }
-                    // If hashes match, no operation needed
-                }
+                Some(_) => operations.push(SyncOperation::UpdateFolder(fs_folder)),
                 None => {
                     // File doesn't exist in database, insert it
                     operations.push(SyncOperation::InsertFolder(fs_folder));

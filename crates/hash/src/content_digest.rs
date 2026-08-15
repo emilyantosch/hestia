@@ -21,6 +21,11 @@ struct MetadataSnapshot {
 }
 
 impl ContentDigest {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; blake3::OUT_LEN]) -> Self {
+        Self(bytes)
+    }
+
     pub async fn observe(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let initial = snapshot(

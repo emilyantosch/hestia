@@ -6,10 +6,13 @@ use entity::{files, prelude::Files};
 use entity::{folders, prelude::Folders};
 use events::{FileEvent, FolderEvent};
 use hash::file_id::FileId;
+use hash::{ContentDigest, FilesystemObjectId};
 use model::commands::filter::{Filter, FolderFilter, TagFilter};
 use model::commands::watched_folders::WatchedFolderTree;
-use model::services::file::FileSystemFile as File;
+use model::services::file::{FileSystemFile as File, PersistedFile};
 use model::services::folder::FileSystemFolder as Folder;
+use notify::EventKind;
+use notify::event::{ModifyKind, RenameMode};
 use sea_orm::ActiveValue::Set;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, IntoActiveModel,
@@ -27,9 +30,8 @@ use crate::thumbnail::operations::ThumbnailOperations;
 pub struct FileMetadata {
     pub id: i32,
     pub path: PathBuf,
-    pub content_hash: String,
-    pub identity_hash: String,
-    pub file_system_id: i32,
+    pub content_digest: ContentDigest,
+    pub filesystem_object_id: FilesystemObjectId,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -308,71 +310,73 @@ impl FileRepository {
     pub async fn upsert_file_from_event(&self, event: &FileEvent) -> Result<files::Model> {
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
-
-        // Extract file information from the event
         let file_path = event
             .paths
             .last()
             .context("cannot upsert a file event without a path")?;
-
         let file_name = file_path
             .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("path {} has no valid file name", file_path.display()))?
             .to_string();
-
-        let path_str = file_path.to_string_lossy().to_string();
-
-        // Get or create file type
+        let path = Self::utf8_path(file_path)?.to_string();
         let file_type_id = self
             .get_or_create_file_type(file_path, &transaction)
             .await?;
+        let content_digest = event
+            .content_digest
+            .context("cannot upsert a file event without a content digest")?;
+        let filesystem_object_id = event
+            .filesystem_object_id
+            .context("cannot upsert a file event without a filesystem object ID")?;
+        let (device_id, inode) = Self::database_object_id(filesystem_object_id)?;
 
-        let hash = event
-            .hash
-            .as_ref()
-            .context("cannot upsert a file event without a hash")?;
-        let content_hash_str = format!("{:?}", hash.content_hash);
-        let identity_hash_str = format!("{:?}", hash.identity_hash);
-
-        // Get file system identifier
-        let file_system_id = self
-            .get_or_create_file_system_identifier(file_path, &transaction)
-            .await?;
-
-        //  What we actually wanna do is check if the file exists by fsi and/or hash.
-        let file_with_fsi = Files::find()
-            .filter(files::Column::FileSystemId.eq(file_system_id))
+        let existing = Files::find()
+            .filter(files::Column::Path.eq(&path))
             .one(&transaction)
             .await?;
+        let existing = if existing.is_none()
+            && event.paths.len() == 2
+            && matches!(
+                &event.kind,
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+            ) {
+            let old_path = event
+                .paths
+                .first()
+                .context("rename event does not contain its old path")?;
+            Files::find()
+                .filter(files::Column::Path.eq(Self::utf8_path(old_path)?))
+                .one(&transaction)
+                .await?
+        } else {
+            existing
+        };
 
-        let file_model = if let Some(existing) = file_with_fsi {
-            // Update existing file
+        let file_model = if let Some(existing) = existing {
             let mut active_model = existing.into_active_model();
             active_model.name = Set(file_name);
-            active_model.path = Set(path_str);
-            active_model.content_hash = Set(content_hash_str);
-            active_model.identity_hash = Set(identity_hash_str);
+            active_model.path = Set(path);
+            active_model.content_digest = Set(content_digest.as_bytes().to_vec());
+            active_model.device_id = Set(device_id);
+            active_model.inode = Set(inode);
             active_model.file_type_id = Set(file_type_id);
-            active_model.file_system_id = Set(file_system_id);
             active_model.updated_at = Set(chrono::Local::now().naive_local());
-
             active_model.update(&transaction).await?
         } else {
-            // Insert new file
-            let new_file = files::ActiveModel {
+            files::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
                 name: Set(file_name),
-                path: Set(path_str),
-                content_hash: Set(content_hash_str),
-                identity_hash: Set(identity_hash_str),
+                path: Set(path),
+                content_digest: Set(content_digest.as_bytes().to_vec()),
+                device_id: Set(device_id),
+                inode: Set(inode),
                 file_type_id: Set(file_type_id),
-                file_system_id: Set(file_system_id),
                 created_at: Set(Utc::now().naive_utc()),
                 updated_at: Set(Utc::now().naive_utc()),
-            };
-
-            new_file.insert(&transaction).await?
+            }
+            .insert(&transaction)
+            .await?
         };
 
         transaction.commit().await?;
@@ -382,11 +386,11 @@ impl FileRepository {
     /// Delete a file record from the database
     pub async fn delete_file_by_path(&self, file_path: &Path) -> Result<bool> {
         tracing::info!("FileOperations: Deleting path {file_path:#?} from database");
-        let path_str = file_path.to_string_lossy().to_string();
+        let path = Self::utf8_path(file_path)?;
         let connection = self.database_manager.get_connection();
 
         let result = Files::delete_many()
-            .filter(files::Column::Path.eq(&path_str))
+            .filter(files::Column::Path.eq(path))
             .exec(&*connection)
             .await?;
 
@@ -497,13 +501,31 @@ impl FileRepository {
         }
     }
 
+    fn utf8_path(path: &Path) -> Result<&str> {
+        path.to_str()
+            .with_context(|| format!("path {} is not valid UTF-8", path.display()))
+    }
+
+    fn database_object_id(object_id: FilesystemObjectId) -> Result<(i64, i64)> {
+        Ok((
+            object_id
+                .device
+                .try_into()
+                .context("filesystem device ID exceeds the SQLite INTEGER range")?,
+            object_id
+                .inode
+                .try_into()
+                .context("filesystem inode exceeds the SQLite INTEGER range")?,
+        ))
+    }
+
     /// Get file by path
     pub async fn get_file_by_path(&self, file_path: &Path) -> Result<Option<files::Model>> {
-        let path_str = file_path.to_string_lossy().to_string();
+        let path = Self::utf8_path(file_path)?;
         let connection = self.database_manager.get_connection();
 
         let files = Files::find()
-            .filter(files::Column::Path.eq(&path_str))
+            .filter(files::Column::Path.eq(path))
             .one(&*connection)
             .await?;
         Ok(files)
@@ -511,8 +533,7 @@ impl FileRepository {
 
     /// Get all files in a directory
     pub async fn get_files_in_directory(&self, dir_path: &Path) -> Result<Vec<files::Model>> {
-        let dir_str = dir_path.to_string_lossy().to_string();
-        let pattern = format!("{dir_str}%");
+        let pattern = format!("{}%", Self::utf8_path(dir_path)?);
         let connection = self.database_manager.get_connection();
 
         let files = Files::find()
@@ -533,36 +554,19 @@ impl FileRepository {
 
         let mut state = HashMap::new();
         for file in files {
+            let updated_at = file.updated_at.and_utc();
+            let file = PersistedFile::try_from(file)?;
             let metadata = FileMetadata {
                 id: file.id,
-                path: PathBuf::from(&file.path),
-                content_hash: file.content_hash,
-                identity_hash: file.identity_hash,
-                file_system_id: file.file_system_id,
-                updated_at: file.updated_at.and_utc(),
+                path: file.path.clone(),
+                content_digest: file.content_digest,
+                filesystem_object_id: file.filesystem_object_id,
+                updated_at,
             };
-            state.insert(PathBuf::from(file.path), metadata);
+            state.insert(file.path, metadata);
         }
 
         Ok(state)
-    }
-
-    /// Get file hashes as a map for quick comparison
-    pub async fn get_file_hashes_map(
-        &self,
-        dir_path: &Path,
-    ) -> Result<HashMap<PathBuf, (String, String)>> {
-        let files = self.get_files_in_directory(dir_path).await?;
-
-        let mut hashes = HashMap::new();
-        for file in files {
-            hashes.insert(
-                PathBuf::from(file.path),
-                (file.content_hash, file.identity_hash),
-            );
-        }
-
-        Ok(hashes)
     }
 
     pub async fn get_watched_folder_map(&self) -> Result<HashMap<String, WatchedFolderTree>> {
@@ -619,64 +623,49 @@ impl FileRepository {
 
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
-
         let mut file_inserted = 0;
         let mut file_updated = 0;
 
         for file_info in files {
-            // Get or create file type (with caching)
             let file_type_id = self
                 .get_or_create_file_type_cached(&file_info.file_type_name, &transaction)
                 .await?;
-
-            // Get file system identifier
-            let file_system_id = if let Some(fsi_id) = file_info.file_system_id {
-                fsi_id
-            } else {
-                self.get_or_create_file_system_identifier(&file_info.path, &transaction)
-                    .await?
-            };
-
-            // Check if file exists
+            let path = Self::utf8_path(&file_info.path)?.to_string();
+            let (device_id, inode) = Self::database_object_id(file_info.filesystem_object_id)?;
             let existing_file = Files::find()
-                .filter(files::Column::Path.eq(file_info.path.to_string_lossy().to_string()))
+                .filter(files::Column::Path.eq(&path))
                 .one(&transaction)
                 .await?;
 
             if let Some(existing) = existing_file {
-                // Update existing file
                 let mut active_model = existing.into_active_model();
                 active_model.name = Set(file_info.name);
-                active_model.content_hash = Set(file_info.content_hash);
-                active_model.identity_hash = Set(file_info.identity_hash);
+                active_model.content_digest = Set(file_info.content_digest.as_bytes().to_vec());
+                active_model.device_id = Set(device_id);
+                active_model.inode = Set(inode);
                 active_model.file_type_id = Set(file_type_id);
-                active_model.file_system_id = Set(file_system_id);
                 active_model.updated_at = Set(Utc::now().naive_utc());
-
                 active_model.update(&transaction).await?;
-                file_inserted += 1;
+                file_updated += 1;
             } else {
-                // Insert new file
-                let new_file = files::ActiveModel {
+                files::ActiveModel {
                     id: sea_orm::ActiveValue::NotSet,
                     name: Set(file_info.name),
-                    path: Set(file_info.path.to_string_lossy().to_string()),
-                    content_hash: Set(file_info.content_hash),
-                    identity_hash: Set(file_info.identity_hash),
+                    path: Set(path),
+                    content_digest: Set(file_info.content_digest.as_bytes().to_vec()),
+                    device_id: Set(device_id),
+                    inode: Set(inode),
                     file_type_id: Set(file_type_id),
-                    file_system_id: Set(file_system_id),
                     created_at: Set(Utc::now().naive_utc()),
                     updated_at: Set(Utc::now().naive_utc()),
-                };
-
-                new_file.insert(&transaction).await?;
-
-                file_updated += 1;
+                }
+                .insert(&transaction)
+                .await?;
+                file_inserted += 1;
             }
         }
 
         transaction.commit().await?;
-
         Ok(UpsertFileBatchReport {
             file_inserted,
             file_updated,
@@ -768,10 +757,10 @@ impl FileRepository {
             return Ok(0);
         }
 
-        let path_strings: Vec<String> = paths
+        let path_strings = paths
             .iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
+            .map(|path| Self::utf8_path(path).map(str::to_owned))
+            .collect::<Result<Vec<_>>>()?;
 
         let connection = self.database_manager.get_connection();
         let result = Files::delete_many()
@@ -888,9 +877,13 @@ impl FileRepository {
                 device_id,
                 inode_num,
             } => {
+                let inode = i64::try_from(inode_num)
+                    .context("filesystem inode exceeds the SQLite INTEGER range")?;
+                let device = i64::try_from(device_id)
+                    .context("filesystem device ID exceeds the SQLite INTEGER range")?;
                 let existing_fsi = file_system_identifier::Entity::find()
-                    .filter(file_system_identifier::Column::Inode.eq(inode_num))
-                    .filter(file_system_identifier::Column::DeviceNum.eq(device_id))
+                    .filter(file_system_identifier::Column::Inode.eq(inode))
+                    .filter(file_system_identifier::Column::DeviceNum.eq(device))
                     .one(transaction)
                     .await?;
 
@@ -898,11 +891,10 @@ impl FileRepository {
                     return Ok(fsi.id);
                 }
 
-                // Create new file system identifier
                 let new_fsi = file_system_identifier::ActiveModel {
                     id: sea_orm::ActiveValue::NotSet,
-                    inode: Set(Some(inode_num.try_into().unwrap_or(0))),
-                    device_num: Set(Some(device_id.try_into().unwrap_or(0))),
+                    inode: Set(Some(inode)),
+                    device_num: Set(Some(device)),
                     index_num: sea_orm::ActiveValue::NotSet,
                     volume_serial_num: sea_orm::ActiveValue::NotSet,
                 };
@@ -913,6 +905,9 @@ impl FileRepository {
                 volume_serial_num,
                 file_index,
             } => {
+                let file_index = i64::try_from(file_index)
+                    .context("filesystem index exceeds the SQLite INTEGER range")?;
+                let volume_serial_num = i64::from(volume_serial_num);
                 let existing_fsi = file_system_identifier::Entity::find()
                     .filter(file_system_identifier::Column::VolumeSerialNum.eq(volume_serial_num))
                     .filter(file_system_identifier::Column::IndexNum.eq(file_index))
@@ -922,13 +917,12 @@ impl FileRepository {
                     return Ok(fsi.id);
                 }
 
-                // Create new file system identifier
                 let new_fsi = file_system_identifier::ActiveModel {
                     id: sea_orm::ActiveValue::NotSet,
                     inode: sea_orm::ActiveValue::NotSet,
                     device_num: sea_orm::ActiveValue::NotSet,
-                    index_num: Set(Some(file_index.try_into().unwrap_or(0))),
-                    volume_serial_num: Set(Some(volume_serial_num.into())),
+                    index_num: Set(Some(file_index)),
+                    volume_serial_num: Set(Some(volume_serial_num)),
                 };
                 let created_fsi = new_fsi.insert(transaction).await?;
                 Ok(created_fsi.id)

@@ -479,7 +479,10 @@ impl ThumbnailProcessor {
             .repository
             .get_files_without_thumbnails_sizes(all_thumbnail_sizes, None)
             .await?;
-        let files: Vec<File> = file_models.into_iter().map(Into::into).collect();
+        let files = file_models
+            .into_iter()
+            .map(File::try_from)
+            .collect::<Result<Vec<_>>>()?;
 
         self.queue_files_for_processing(files, ThumbnailSize::all().to_vec())
             .await
