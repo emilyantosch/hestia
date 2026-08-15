@@ -1,6 +1,7 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use events::{FileEvent, FolderEvent};
-use hash::hash::{FileHash, FolderHash};
+use hash::hash::FolderHash;
+use hash::{ContentDigest, FilesystemObjectId};
 use model::services::CanonPath;
 use notify::event::{CreateKind, EventKind, RemoveKind};
 use notify::{RecommendedWatcher, RecursiveMode};
@@ -197,6 +198,7 @@ impl FileWatcher {
         Ok(())
     }
 
+    // ponytail: temporary direct-write adapter; remove when scanner owns reconciliation
     async fn to_database(event: FSEvent, db_operations: &FileOperations) -> Result<()> {
         if let Some(file_event) = event.file_event {
             match file_event.kind {
@@ -331,25 +333,30 @@ async fn to_file_event_and_send(
 ) -> Result<()> {
     let kind = event.kind;
     let paths = event.paths.clone();
-    let mut hash: Option<FileHash> = None;
     tracing::info!("The following paths are involved in the file event: {paths:#?}");
     tracing::info!("The event kind is {kind:#?}");
-    if kind != EventKind::Remove(RemoveKind::File) {
-        hash = Some(
-            FileHash::hash(
-                paths
-                    .last()
-                    .context("file event does not contain a path to hash")?,
-            )
-            .await?,
+    let (content_digest, filesystem_object_id) = if matches!(kind, EventKind::Remove(_)) {
+        (None, None)
+    } else {
+        let path = paths
+            .last()
+            .context("file event does not contain a path to observe")?;
+        let before = FilesystemObjectId::observe(path).await?;
+        let content_digest = ContentDigest::observe(path).await?;
+        let filesystem_object_id = FilesystemObjectId::observe(path).await?;
+        ensure!(
+            before == filesystem_object_id,
+            "file was replaced while the watcher observed it"
         );
-    }
+        (Some(content_digest), Some(filesystem_object_id))
+    };
 
     let file_event = FileEvent {
         event,
         kind,
         paths,
-        hash,
+        content_digest,
+        filesystem_object_id,
     };
     tracing::info!("Constructed FileEvent from Raw Stream");
 

@@ -13,6 +13,7 @@ events = { workspace = true }
 hash = { workspace = true }
 library = { workspace = true }
 model = { workspace = true }
+notify = { workspace = true }
 sea-orm = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
@@ -20,6 +21,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+migration = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 
 [lints]

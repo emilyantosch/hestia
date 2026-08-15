@@ -7,11 +7,12 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub file_system_id: i32,
     pub name: String,
     pub path: String,
-    pub content_hash: String,
-    pub identity_hash: String,
+    #[sea_orm(column_type = "Binary(32)")]
+    pub content_digest: Vec<u8>,
+    pub device_id: i64,
+    pub inode: i64,
     pub file_type_id: i32,
     pub created_at: DateTime,
     pub updated_at: DateTime,
@@ -21,14 +22,6 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::file_has_tags::Entity")]
     FileHasTags,
-    #[sea_orm(
-        belongs_to = "super::file_system_identifier::Entity",
-        from = "Column::FileSystemId",
-        to = "super::file_system_identifier::Column::Id",
-        on_update = "Cascade",
-        on_delete = "Restrict"
-    )]
-    FileSystemIdentifier,
     #[sea_orm(
         belongs_to = "super::file_types::Entity",
         from = "Column::FileTypeId",
@@ -44,12 +37,6 @@ pub enum Relation {
 impl Related<super::file_has_tags::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::FileHasTags.def()
-    }
-}
-
-impl Related<super::file_system_identifier::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FileSystemIdentifier.def()
     }
 }
 
