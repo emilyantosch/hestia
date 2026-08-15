@@ -26,6 +26,11 @@ impl ContentDigest {
         Self(bytes)
     }
 
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; blake3::OUT_LEN] {
+        &self.0
+    }
+
     pub async fn observe(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let initial = snapshot(
@@ -78,11 +83,6 @@ impl ContentDigest {
         );
 
         Ok(Self(hasher.finalize().into()))
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; blake3::OUT_LEN] {
-        &self.0
     }
 }
 
