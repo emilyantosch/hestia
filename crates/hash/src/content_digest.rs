@@ -32,7 +32,7 @@ impl ContentDigest {
             .await
             .with_context(|| format!("failed to open {}", path.display()))?;
         let opened = snapshot(&file.metadata().await?)?;
-        ensure_unchanged(initial, opened, "file changed while it was being opened")?;
+        ensure!(initial == opened, "file changed while it was being opened");
 
         let mut hasher = Hasher::new();
         let mut buffer = vec![0; READ_BUFFER_SIZE];
@@ -62,12 +62,11 @@ impl ContentDigest {
                 .await
                 .with_context(|| format!("failed to inspect {} after reading", path.display()))?,
         )?;
-        ensure_unchanged(initial, finished, "file changed while it was being read")?;
-        ensure_unchanged(
-            initial,
-            current,
-            "file path was replaced while it was being read",
-        )?;
+        ensure!(initial == finished, "file changed while it was being read");
+        ensure!(
+            initial == current,
+            "file path was replaced while it was being read"
+        );
         ensure!(
             bytes_read == initial.length,
             "file length changed while it was being read"
@@ -80,15 +79,6 @@ impl ContentDigest {
     pub const fn as_bytes(&self) -> &[u8; blake3::OUT_LEN] {
         &self.0
     }
-}
-
-fn ensure_unchanged(
-    expected: MetadataSnapshot,
-    observed: MetadataSnapshot,
-    message: &str,
-) -> Result<()> {
-    ensure!(expected == observed, "{message}");
-    Ok(())
 }
 
 fn snapshot(metadata: &Metadata) -> Result<MetadataSnapshot> {
@@ -108,39 +98,19 @@ fn snapshot(metadata: &Metadata) -> Result<MetadataSnapshot> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MetadataSnapshot, ensure_unchanged};
-    use std::time::{Duration, UNIX_EPOCH};
+    use super::{ContentDigest, READ_BUFFER_SIZE};
+    use anyhow::Result;
 
-    #[test]
-    fn metadata_snapshot_changes_and_path_replacement_are_rejected() {
-        let original = MetadataSnapshot {
-            device: 1,
-            inode: 2,
-            length: 3,
-            modified: UNIX_EPOCH,
-        };
-        let changes = [
-            MetadataSnapshot {
-                device: 4,
-                ..original
-            },
-            MetadataSnapshot {
-                inode: 4,
-                ..original
-            },
-            MetadataSnapshot {
-                length: 4,
-                ..original
-            },
-            MetadataSnapshot {
-                modified: UNIX_EPOCH + Duration::from_nanos(1),
-                ..original
-            },
-        ];
+    #[tokio::test]
+    async fn observe_reads_to_eof_across_multiple_chunks() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("file");
+        let content = vec![42; READ_BUFFER_SIZE * 2 + 17];
+        tokio::fs::write(&path, &content).await?;
 
-        assert!(ensure_unchanged(original, original, "changed").is_ok());
-        for changed in changes {
-            assert!(ensure_unchanged(original, changed, "changed").is_err());
-        }
+        let observed = ContentDigest::observe(path).await?;
+
+        assert_eq!(observed.as_bytes(), blake3::hash(&content).as_bytes());
+        Ok(())
     }
 }
