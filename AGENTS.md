@@ -1,0 +1,1 @@
+Run Qt-building Cargo commands inside `nix develop` (for example, `nix develop --command cargo test --workspace`) so `QMAKE` finds the flake’s combined Qt Base/Declarative prefix and QML `.prl` files.
