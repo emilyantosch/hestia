@@ -8,10 +8,8 @@ use sea_orm::{entity::prelude::*, sqlx::types::chrono};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub content_hash: String,
-    pub identity_hash: String,
-    pub structure_hash: String,
-    pub file_system_id: i32,
+    pub device_id: i64,
+    pub inode: i64,
     pub parent_folder_id: Option<i32>,
     pub name: String,
     pub path: String,
@@ -22,14 +20,6 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::file_system_identifier::Entity",
-        from = "Column::FileSystemId",
-        to = "super::file_system_identifier::Column::Id",
-        on_update = "Cascade",
-        on_delete = "Restrict"
-    )]
-    FileSystemIdentifier,
-    #[sea_orm(
         belongs_to = "Entity",
         from = "Column::ParentFolderId",
         to = "Column::Id",
@@ -37,12 +27,6 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     SelfRef,
-}
-
-impl Related<super::file_system_identifier::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FileSystemIdentifier.def()
-    }
 }
 
 #[async_trait]

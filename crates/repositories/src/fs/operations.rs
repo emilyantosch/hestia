@@ -134,52 +134,42 @@ impl FileRepository {
     where
         C: ConnectionTrait,
     {
-        let possible_root_folder = Folders::find()
-            .filter(folders::Column::Path.eq(path.to_string_lossy().to_string()))
+        let folder_info = Folder::create_folder_info(&path).await?;
+        let path = Self::utf8_path(&path)?.to_string();
+        let (device_id, inode) = Self::database_object_id(folder_info.filesystem_object_id)?;
+        let existing = Folders::find()
+            .filter(folders::Column::Path.eq(&path))
             .one(transaction)
             .await?;
-        let folder_info = Folder::create_folder_info(&path).await?;
-        tracing::info!("Got folder info {folder_info:#?} for root folder {path:#?}");
-        let file_system_id = self
-            .get_or_create_file_system_identifier(&path, transaction)
-            .await?;
-        tracing::info!("Got file system id {file_system_id:#?} for root folder {path:#?}");
-        if let Some(rf) = possible_root_folder {
-            let mut active_rf = rf.into_active_model();
-            active_rf.name = Set(folder_info.name);
-            active_rf.file_system_id = Set(file_system_id);
-            active_rf.parent_folder_id = Set(None);
-            active_rf.content_hash = Set(folder_info.content_hash);
-            active_rf.identity_hash = Set(folder_info.identity_hash);
-            active_rf.structure_hash = Set(folder_info.structure_hash);
 
-            tracing::info!("Updating existing root folder {path:#?}");
-            active_rf.update(transaction).await?;
+        if let Some(existing) = existing {
+            let mut active = existing.into_active_model();
+            active.name = Set(folder_info.name);
+            active.device_id = Set(device_id);
+            active.inode = Set(inode);
+            active.parent_folder_id = Set(None);
+            active.update(transaction).await?;
         } else {
-            let new_folder = folders::ActiveModel {
+            folders::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
                 name: Set(folder_info.name),
-                path: Set(path.to_string_lossy().to_string()),
+                path: Set(path),
                 parent_folder_id: Set(None),
-                content_hash: Set(folder_info.content_hash),
-                identity_hash: Set(folder_info.identity_hash),
-                structure_hash: Set(folder_info.structure_hash),
-                file_system_id: Set(file_system_id),
+                device_id: Set(device_id),
+                inode: Set(inode),
                 created_at: Set(chrono::Local::now().naive_local()),
                 updated_at: Set(chrono::Local::now().naive_local()),
-            };
-
-            tracing::info!("Inserting existing root folder {path:#?}");
-            new_folder.insert(transaction).await?;
-            tracing::info!("Insert of {path:#?} complete!");
+            }
+            .insert(transaction)
+            .await?;
         }
         Ok(())
     }
 
-    pub async fn find_folder_by_id(&self, fsi_id: i32) -> Result<Option<folders::Model>> {
+    pub async fn find_folder_by_id(&self, folder_id: i32) -> Result<Option<folders::Model>> {
         let connection = self.database_manager.get_connection();
         let folder = Folders::find()
-            .filter(folders::Column::Id.eq(fsi_id))
+            .filter(folders::Column::Id.eq(folder_id))
             .one(&*connection)
             .await?;
 
@@ -234,76 +224,70 @@ impl FileRepository {
     pub async fn upsert_folder_from_event(&self, event: &FolderEvent) -> Result<folders::Model> {
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
-
         let folder_path = event
             .paths
             .last()
             .context("cannot upsert a folder event without a path")?;
-
         let folder_name = folder_path
             .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("path {} has no valid folder name", folder_path.display()))?
             .to_string();
-
-        let path_str = folder_path.to_string_lossy().to_string();
-
-        let hash = event
-            .hash
-            .as_ref()
-            .context("cannot upsert a folder event without a hash")?;
-        let content_hash_str = format!("{:?}", hash.content_hash);
-        let identity_hash_str = format!("{:?}", hash.identity_hash);
-        let structure_hash_str = format!("{:?}", hash.structure_hash);
-
-        // Get file system identifier
-        let file_system_id = self
-            .get_or_create_file_system_identifier(folder_path, &transaction)
-            .await?;
-
+        let path = Self::utf8_path(folder_path)?.to_string();
+        let filesystem_object_id = event
+            .filesystem_object_id
+            .context("cannot upsert a folder event without a filesystem object ID")?;
+        let (device_id, inode) = Self::database_object_id(filesystem_object_id)?;
         let parent_folder_id = self
             .find_parent_folder_id(folder_path, &transaction)
             .await?;
-
-        //  What we actually wanna do is check if the file exists by fsi and/or hash.
-        let folder_with_fsi = Folders::find()
-            .filter(folders::Column::FileSystemId.eq(file_system_id))
+        let existing = Folders::find()
+            .filter(folders::Column::Path.eq(&path))
             .one(&transaction)
             .await?;
-
-        let folder_model = if let Some(existing) = folder_with_fsi {
-            // Update existing file
-            let mut active_model = existing.into_active_model();
-            active_model.name = Set(folder_name);
-            active_model.path = Set(path_str);
-            active_model.content_hash = Set(content_hash_str);
-            active_model.identity_hash = Set(identity_hash_str);
-            active_model.structure_hash = Set(structure_hash_str);
-            active_model.parent_folder_id = Set(parent_folder_id);
-            active_model.file_system_id = Set(file_system_id);
-            active_model.updated_at = Set(chrono::Local::now().naive_local());
-
-            active_model.update(&transaction).await?
+        let existing = if existing.is_none()
+            && event.paths.len() == 2
+            && matches!(
+                event.kind,
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+            ) {
+            let old_path = event
+                .paths
+                .first()
+                .context("rename event does not contain its old path")?;
+            Folders::find()
+                .filter(folders::Column::Path.eq(Self::utf8_path(old_path)?))
+                .one(&transaction)
+                .await?
         } else {
-            // Insert new file
-            let new_folder = folders::ActiveModel {
+            existing
+        };
+
+        let folder_model = if let Some(existing) = existing {
+            let mut active = existing.into_active_model();
+            active.name = Set(folder_name);
+            active.path = Set(path);
+            active.parent_folder_id = Set(parent_folder_id);
+            active.device_id = Set(device_id);
+            active.inode = Set(inode);
+            active.updated_at = Set(chrono::Local::now().naive_local());
+            active.update(&transaction).await?
+        } else {
+            folders::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
                 name: Set(folder_name),
-                path: Set(path_str),
+                path: Set(path),
                 parent_folder_id: Set(parent_folder_id),
-                content_hash: Set(content_hash_str),
-                identity_hash: Set(identity_hash_str),
-                structure_hash: Set(structure_hash_str),
-                file_system_id: Set(file_system_id),
+                device_id: Set(device_id),
+                inode: Set(inode),
                 created_at: Set(Utc::now().naive_utc()),
                 updated_at: Set(Utc::now().naive_utc()),
-            };
-
-            new_folder.insert(&transaction).await?
+            }
+            .insert(&transaction)
+            .await?
         };
 
         transaction.commit().await?;
-
         Ok(folder_model)
     }
     /// Insert or update a file in the database based on `FileEvent`
@@ -685,66 +669,47 @@ impl FileRepository {
 
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
-
         let mut folder_inserted = 0;
         let mut folder_updated = 0;
 
-        for folder_info in folders {
-            // Find parent folder id
+        for folder in folders {
             let parent_folder_id = self
-                .find_parent_folder_id(&folder_info.path, &transaction)
+                .find_parent_folder_id(&folder.path, &transaction)
                 .await?;
-
-            // Get file system identifier
-            let file_system_id = match folder_info.file_system_id {
-                Some(fsi_id) => fsi_id,
-                None => {
-                    self.get_or_create_file_system_identifier(&folder_info.path, &transaction)
-                        .await?
-                }
-            };
-
-            // Check if file exists
-            let possible_folder = Folders::find()
-                .filter(folders::Column::Path.eq(folder_info.path.to_string_lossy().to_string()))
+            let path = Self::utf8_path(&folder.path)?.to_string();
+            let (device_id, inode) = Self::database_object_id(folder.filesystem_object_id)?;
+            let existing = Folders::find()
+                .filter(folders::Column::Path.eq(&path))
                 .one(&transaction)
                 .await?;
 
-            if let Some(existing) = possible_folder {
-                // Update existing file
-                let mut existing_folder = existing.into_active_model();
-                existing_folder.name = Set(folder_info.name);
-                existing_folder.content_hash = Set(folder_info.content_hash);
-                existing_folder.identity_hash = Set(folder_info.identity_hash);
-                existing_folder.structure_hash = Set(folder_info.structure_hash);
-                existing_folder.parent_folder_id = Set(parent_folder_id);
-                existing_folder.file_system_id = Set(file_system_id);
-                existing_folder.updated_at = Set(Utc::now().naive_utc());
-
-                existing_folder.update(&transaction).await?;
+            if let Some(existing) = existing {
+                let mut active = existing.into_active_model();
+                active.name = Set(folder.name);
+                active.parent_folder_id = Set(parent_folder_id);
+                active.device_id = Set(device_id);
+                active.inode = Set(inode);
+                active.updated_at = Set(Utc::now().naive_utc());
+                active.update(&transaction).await?;
                 folder_updated += 1;
             } else {
-                // Insert new file
-                let new_folder = folders::ActiveModel {
+                folders::ActiveModel {
                     id: sea_orm::ActiveValue::NotSet,
-                    name: Set(folder_info.name),
-                    path: Set(folder_info.path.to_string_lossy().to_string()),
-                    content_hash: Set(folder_info.content_hash),
-                    identity_hash: Set(folder_info.identity_hash),
-                    structure_hash: Set(folder_info.structure_hash),
+                    name: Set(folder.name),
+                    path: Set(path),
                     parent_folder_id: Set(parent_folder_id),
-                    file_system_id: Set(file_system_id),
+                    device_id: Set(device_id),
+                    inode: Set(inode),
                     created_at: Set(Utc::now().naive_utc()),
                     updated_at: Set(Utc::now().naive_utc()),
-                };
-
-                new_folder.insert(&transaction).await?;
+                }
+                .insert(&transaction)
+                .await?;
                 folder_inserted += 1;
             }
         }
 
         transaction.commit().await?;
-
         Ok(UpsertFolderBatchReport {
             folder_inserted,
             folder_updated,
