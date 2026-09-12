@@ -7,10 +7,8 @@ pub struct Migration;
 enum Folders {
     Table,
     Id,
-    ContentHash,
-    IdentityHash,
-    StructureHash,
-    FileSystemId,
+    DeviceId,
+    Inode,
     ParentFolderId,
     Name,
     Path,
@@ -18,39 +16,22 @@ enum Folders {
     UpdatedAt,
 }
 
-#[derive(DeriveIden)]
-enum FileSystemIdentifier {
-    Table,
-    Id,
-}
-
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Create Folders table
         manager
             .create_table(
                 Table::create()
                     .table(Folders::Table)
                     .if_not_exists()
                     .col(pk_auto(Folders::Id))
-                    .col(string(Folders::ContentHash))
-                    .col(string(Folders::IdentityHash))
-                    .col(string(Folders::StructureHash))
-                    .col(integer(Folders::FileSystemId))
+                    .col(big_integer(Folders::DeviceId))
+                    .col(big_integer(Folders::Inode))
                     .col(integer_null(Folders::ParentFolderId))
                     .col(string(Folders::Name))
                     .col(string(Folders::Path))
                     .col(date_time(Folders::CreatedAt))
                     .col(date_time(Folders::UpdatedAt))
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_folders_file_system_identifier")
-                            .from(Folders::Table, Folders::FileSystemId)
-                            .to(FileSystemIdentifier::Table, FileSystemIdentifier::Id)
-                            .on_delete(ForeignKeyAction::Restrict)
-                            .on_update(ForeignKeyAction::Cascade),
-                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_folders_parent_folder")
@@ -63,34 +44,42 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // Create index for Folders
-        manager
-            .create_index(
-                Index::create()
-                    .table(Folders::Table)
-                    .if_not_exists()
-                    .col(Folders::Id)
-                    .col(Folders::FileSystemId)
-                    .col(Folders::ParentFolderId)
-                    .name("idx_folders_id_filesystem_parent")
-                    .to_owned(),
-            )
-            .await?;
+        for index in [
+            Index::create()
+                .name("idx_folders_path")
+                .table(Folders::Table)
+                .col(Folders::Path)
+                .unique()
+                .to_owned(),
+            Index::create()
+                .name("idx_folders_filesystem_object")
+                .table(Folders::Table)
+                .col(Folders::DeviceId)
+                .col(Folders::Inode)
+                .to_owned(),
+            Index::create()
+                .name("idx_folders_parent")
+                .table(Folders::Table)
+                .col(Folders::ParentFolderId)
+                .to_owned(),
+        ] {
+            manager.create_index(index).await?;
+        }
 
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Drop index first
-        manager
-            .drop_index(
-                Index::drop()
-                    .name("idx_folders_id_filesystem_parent")
-                    .to_owned(),
-            )
-            .await?;
+        for name in [
+            "idx_folders_parent",
+            "idx_folders_filesystem_object",
+            "idx_folders_path",
+        ] {
+            manager
+                .drop_index(Index::drop().name(name).to_owned())
+                .await?;
+        }
 
-        // Drop Folders table (foreign keys will be dropped automatically)
         manager
             .drop_table(Table::drop().table(Folders::Table).to_owned())
             .await?;

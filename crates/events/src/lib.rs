@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use hash::hash::FolderHash;
 use hash::{ContentDigest, FilesystemObjectId};
 use notify::EventKind;
 use notify_debouncer_full::DebouncedEvent;
@@ -19,5 +18,5 @@ pub struct FolderEvent {
     pub event: DebouncedEvent,
     pub paths: Vec<PathBuf>,
     pub kind: EventKind,
-    pub hash: Option<FolderHash>,
+    pub filesystem_object_id: Option<FilesystemObjectId>,
 }

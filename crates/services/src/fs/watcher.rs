@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
 use events::{FileEvent, FolderEvent};
-use hash::hash::FolderHash;
 use hash::{ContentDigest, FilesystemObjectId};
 use model::services::CanonPath;
 use notify::event::{CreateKind, EventKind, RemoveKind};
@@ -374,25 +373,26 @@ async fn to_folder_event_and_send(
 ) -> Result<()> {
     let kind = event.kind;
     let paths = event.paths.clone();
-    let mut hash = None;
-    tracing::info!("The following paths are involved in the file event: {paths:#?}");
+    tracing::info!("The following paths are involved in the folder event: {paths:#?}");
     tracing::info!("The event kind is {kind:#?}");
-    if kind != EventKind::Remove(RemoveKind::Folder) {
-        hash = Some(
-            FolderHash::hash(
+    let filesystem_object_id = if kind == EventKind::Remove(RemoveKind::Folder) {
+        None
+    } else {
+        Some(
+            FilesystemObjectId::observe(
                 paths
                     .last()
-                    .context("folder event does not contain a path to hash")?,
+                    .context("folder event does not contain a path to observe")?,
             )
             .await?,
-        );
-    }
+        )
+    };
 
     let folder_event = FolderEvent {
         event,
         kind,
         paths,
-        hash,
+        filesystem_object_id,
     };
     tracing::info!("Constructed FileEvent from Raw Stream");
 
