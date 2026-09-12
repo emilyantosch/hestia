@@ -63,5 +63,49 @@ async fn equal_content_and_hard_links_remain_separate_file_entries() -> Result<(
         (original.device_id, original.inode),
         (hard_link.device_id, hard_link.inode)
     );
+    // The same entry spelling must work for observation, event upserts, and
+    // deletion, even when the original path no longer exists.
+    let root = directory.path().canonicalize()?;
+    let target = root.join("target");
+    tokio::fs::create_dir(&target).await?;
+    std::os::unix::fs::symlink(&target, root.join("alias"))?;
+    let entry = root.join("alias/entry.txt");
+    let alternate = root.join("unused/../alias/./entry.txt");
+    tokio::fs::write(&entry, b"entry bytes").await?;
+    let observation = FileSystemFile::create_file_info_from_path(&alternate).await?;
+    assert_eq!(observation.path, entry);
+    assert_ne!(observation.path, entry.canonicalize()?);
+    repository
+        .batch_upsert_files(vec![observation.clone()])
+        .await?;
+    let stored = repository
+        .get_file_by_path(&alternate)
+        .await?
+        .context("missing entry")?;
+    assert_eq!(stored.path, entry.to_str().context("non-UTF-8 test path")?);
+
+    let event = notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+        .add_path(alternate.clone());
+    let updated = repository
+        .upsert_file_from_event(&events::FileEvent {
+            kind: event.kind,
+            paths: event.paths.clone(),
+            event: notify_debouncer_full::DebouncedEvent::new(event, std::time::Instant::now()),
+            content_digest: Some(observation.content_digest),
+            filesystem_object_id: Some(observation.filesystem_object_id),
+        })
+        .await?;
+    assert_eq!(updated.id, stored.id);
+    let state = repository.get_database_state(&root).await?;
+    assert_eq!(
+        state
+            .get(&entry)
+            .context("missing comparison key")?
+            .content_digest,
+        observation.content_digest
+    );
+    tokio::fs::remove_file(&entry).await?;
+    assert!(repository.delete_file_by_path(&alternate).await?);
+    assert!(repository.get_file_by_path(&entry).await?.is_none());
     Ok(())
 }

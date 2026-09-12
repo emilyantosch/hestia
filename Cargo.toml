@@ -24,6 +24,7 @@ cxx-qt-lib = { default-features = false, features = [ "qt_full" ], version = "0.
 dirs = "6.0.0"
 image = { default-features = false, features = [ "bmp", "gif", "jpeg", "png", "tiff", "webp" ], version = "0.25" }
 infer = "0.19.0"
+itertools = "0.15.0"
 keyring = "3.6.2"
 notify = "8.0.0"
 notify-debouncer-full = "0.6.0"

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -104,49 +104,50 @@ impl DirectoryScanner {
         clippy::too_many_lines,
         reason = "the linear synchronization workflow is clearer in one place"
     )]
-    pub async fn sync_directory(&self, dir_path: &Path) -> Result<SyncReport> {
+    pub async fn sync_directory(
+        &self,
+        dir_path: &model::services::CanonPath,
+    ) -> Result<SyncReport> {
+        let dir_path = dir_path.as_ref();
         let start_time = Instant::now();
         let mut report = SyncReport::new();
 
         tracing::info!("Starting directory sync for: {}", dir_path.display());
 
-        // 1. Get current database state
-        let db_state = match self.file_operations.get_directory_state(dir_path).await {
-            Ok(state) => state,
-            Err(e) => {
-                let error_msg = format!("Failed to get database state: {e:?}");
-                report.errors.push(error_msg.clone());
-                return Err(e);
-            }
-        };
+        let db_state = self
+            .file_operations
+            .get_database_state(dir_path)
+            .await
+            .inspect_err(|error| {
+                report
+                    .errors
+                    .push(format!("failed to get database state: {error}"));
+            })?;
 
         tracing::info!("Found {} files in database", db_state.len());
 
-        // 2. Scan filesystem
-        let fs_files = match self.scan_filesystem_recursive(dir_path).await {
-            Ok(files) => files,
-            Err(e) => {
-                let error_msg = format!("Failed to scan filesystem: {e:?}");
-                report.errors.push(error_msg);
-                return Err(e);
-            }
-        };
+        let (files, folders) =
+            self.scan_filesystem_recursive(dir_path)
+                .await
+                .inspect_err(|error| {
+                    report
+                        .errors
+                        .push(format!("Failed to scan filesystem state: {error}"));
+                })?;
 
-        report.files_scanned = fs_files.0.len();
-        tracing::info!("Found {} files in filesystem", fs_files.0.len());
+        report.files_scanned = files.len();
+        tracing::info!("Found {} files in filesystem", files.len());
 
-        report.folders_scanned = fs_files.1.len();
-        tracing::info!("Found {} folders in filesystem", fs_files.1.len());
+        report.folders_scanned = folders.len();
+        tracing::info!("Found {} folders in filesystem", folders.len());
 
         // 3a. Calculate file sync operations
         let mut operations: Vec<SyncOperation> =
-            Self::calculate_file_sync_operations(&db_state, fs_files.0);
+            Self::calculate_file_sync_operations(&db_state, files);
         tracing::info!("Calculated {} file operations to perform", operations.len());
 
         // 3b. Calculate all sync operations
-        operations.extend(Self::calculate_folder_sync_operations(
-            &db_state, fs_files.1,
-        ));
+        operations.extend(Self::calculate_folder_sync_operations(&db_state, folders));
         tracing::info!(
             "Calculated {} file and folder operations to perform",
             operations.len()
@@ -272,13 +273,9 @@ impl DirectoryScanner {
     ) -> Result<()> {
         //TODO: Also need to add the root directory, which then could be one of the only ones, that
         //does not have a parent_folder_id
-        let mut entries = match fs::read_dir(dir_path).await {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::error!("Failed to read directory {}: {}", dir_path.display(), e);
-                return Err(e)?; // Continue with other directories
-            }
-        };
+        let mut entries = fs::read_dir(dir_path)
+            .await
+            .context("Could not read directory")?;
 
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
@@ -294,14 +291,10 @@ impl DirectoryScanner {
                     continue;
                 }
 
-                //TODO: Also need to add all of the folders, recurse into them and add all folders
-                //into database.
-                match Folder::create_folder_info(&path).await {
-                    Ok(folder_info) => folders.push(folder_info),
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
+                let folder_info = Folder::create_folder_info(&path)
+                    .await
+                    .context("Could not create folder info")?;
+                folders.push(folder_info);
 
                 // Recurse into subdirectory if configured
                 if self.config.recursive {
@@ -325,13 +318,10 @@ impl DirectoryScanner {
                 }
 
                 // Process the file
-                match File::create_file_info_from_path(&path).await {
-                    Ok(file_info) => files.push(file_info),
-                    Err(e) => {
-                        tracing::error!("Failed to process file {}: {:?}", path.display(), e);
-                        // Continue with other files
-                    }
-                }
+                let file_info = File::create_file_info_from_path(&path)
+                    .await
+                    .context("Could not create file info")?;
+                files.push(file_info);
             }
         }
         Ok(())

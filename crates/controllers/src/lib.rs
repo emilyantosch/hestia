@@ -315,6 +315,7 @@ type ControllerResult<T> = std::result::Result<T, ControllerError>;
 
 #[derive(Debug)]
 struct Workspace {
+    library_paths: Vec<CanonPath>,
     database_manager: Arc<DatabaseManager>,
     file_operations: Arc<FileRepository>,
     thumbnail_processor: ThumbnailProcessorHandler,
@@ -325,7 +326,8 @@ struct Workspace {
 enum AppState {
     AwaitingLibrary,
     Ready {
-        library: Library,
+        // Retain the library until deactivation: its Drop saves the last library.
+        _library: Library,
         workspace: Workspace,
     },
 }
@@ -440,24 +442,13 @@ impl AppController {
     pub async fn initialize_workspace(&self) -> ControllerResult<()> {
         let (database_manager, file_operations, library_paths) = {
             let state = self.state.lock().await;
-            let AppState::Ready { library, workspace } = &*state else {
+            let AppState::Ready { workspace, .. } = &*state else {
                 return Err(ControllerError::NoLibrarySelected);
             };
-            let library_paths = library
-                .library_config
-                .as_ref()
-                .map(|config| {
-                    config
-                        .library_paths
-                        .iter()
-                        .filter_map(|path| path.path.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
             (
                 Arc::clone(&workspace.database_manager),
                 Arc::clone(&workspace.file_operations),
-                library_paths,
+                workspace.library_paths.clone(),
             )
         };
 
@@ -482,21 +473,13 @@ impl AppController {
     pub async fn scan(&self) -> ControllerResult<ScanReport> {
         let (file_operations, library_paths) = {
             let state = self.state.lock().await;
-            let AppState::Ready { library, workspace } = &*state else {
+            let AppState::Ready { workspace, .. } = &*state else {
                 return Err(ControllerError::NoLibrarySelected);
             };
-            let paths = library
-                .library_config
-                .as_ref()
-                .map(|config| {
-                    config
-                        .library_paths
-                        .iter()
-                        .filter_map(|path| path.path.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            (Arc::clone(&workspace.file_operations), paths)
+            (
+                Arc::clone(&workspace.file_operations),
+                workspace.library_paths.clone(),
+            )
         };
 
         let scanner = DirectoryScanner::new(file_operations);
@@ -535,7 +518,7 @@ impl AppController {
     pub async fn start_watching(&self) -> ControllerResult<mpsc::UnboundedReceiver<()>> {
         let (database_manager, paths) = {
             let mut state = self.state.lock().await;
-            let AppState::Ready { library, workspace } = &mut *state else {
+            let AppState::Ready { workspace, .. } = &mut *state else {
                 return Err(ControllerError::NoLibrarySelected);
             };
             if workspace.watcher_started {
@@ -545,18 +528,10 @@ impl AppController {
                 ));
             }
             workspace.watcher_started = true;
-            let paths = library
-                .library_config
-                .as_ref()
-                .map(|config| {
-                    config
-                        .library_paths
-                        .iter()
-                        .filter_map(|path| path.path.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            (Arc::clone(&workspace.database_manager), paths)
+            (
+                Arc::clone(&workspace.database_manager),
+                workspace.library_paths.clone(),
+            )
         };
 
         let (watcher_sender, watcher_receiver) = mpsc::unbounded_channel();
@@ -574,9 +549,6 @@ impl AppController {
             }
         });
         for path in paths {
-            let path = CanonPath::try_from(path).map_err(|error| {
-                ControllerError::operation(ControllerOperation::StartWatcher, error)
-            })?;
             watcher_sender
                 .send(FileWatcherMessage::WatchPath(path))
                 .map_err(|error| {
@@ -784,13 +756,23 @@ impl AppController {
         let workspace = Workspace::open(&library)
             .await
             .map_err(|error| ControllerError::operation(ControllerOperation::OpenLibrary, error))?;
-        *self.state.lock().await = AppState::Ready { library, workspace };
+        *self.state.lock().await = AppState::Ready {
+            _library: library,
+            workspace,
+        };
         Ok(info)
     }
 }
 
 impl Workspace {
     async fn open(library: &Library) -> Result<Self> {
+        let library_paths = library
+            .library_config
+            .iter()
+            .flat_map(|config| &config.library_paths)
+            .filter_map(|root| root.path.clone())
+            .map(CanonPath::try_from)
+            .collect::<Result<Vec<_>>>()?;
         let database_path = library.get_canon_database_path()?;
         let connection_string = format!(
             "sqlite:///{}",
@@ -818,6 +800,7 @@ impl Workspace {
             }
         });
         Ok(Self {
+            library_paths,
             database_manager,
             file_operations,
             thumbnail_processor,
@@ -841,7 +824,10 @@ mod tests {
         let library = controller.create_library("Photos", content.path()).await?;
 
         assert_eq!(library.name().as_str(), "Photos");
-        assert_eq!(library.path(), data_home.path().join("hestia/Photos"));
+        assert_eq!(
+            library.path(),
+            data_home.path().canonicalize()?.join("hestia/Photos")
+        );
         assert!(library.path().join("config.toml").is_file());
         assert!(library.path().join("db.sqlite").is_file());
         Ok(())
@@ -875,11 +861,62 @@ mod tests {
         let content = TempDir::new()?;
         let creator = AppController::new_in(data_home.path())?;
         let created = creator.create_library("Photos", content.path()).await?;
+        let alias = data_home.path().join("content-alias");
+        std::os::unix::fs::symlink(content.path(), &alias)?;
+        std::fs::write(content.path().join("photo.txt"), "photo")?;
+        {
+            let mut state = creator.state.lock().await;
+            let super::AppState::Ready {
+                _library: library, ..
+            } = &mut *state
+            else {
+                bail!("created library is not ready");
+            };
+            library
+                .library_config
+                .as_mut()
+                .context("missing config")?
+                .library_paths
+                .first_mut()
+                .context("missing root")?
+                .path = Some(alias.clone());
+            library.save_config()?;
+        }
         let controller = AppController::new_in(data_home.path())?;
-
         let selected = controller.select_library(created.path()).await?;
-
         assert_eq!(selected, created);
+        {
+            let state = controller.state.lock().await;
+            let super::AppState::Ready {
+                _library: library,
+                workspace,
+            } = &*state
+            else {
+                bail!("selected library is not ready");
+            };
+            let configured_path = library
+                .library_config
+                .as_ref()
+                .and_then(|config| config.library_paths.first())
+                .and_then(|root| root.path.as_ref());
+            assert_eq!(configured_path, Some(&alias));
+            assert_eq!(
+                workspace
+                    .library_paths
+                    .first()
+                    .context("missing active root")?
+                    .as_ref(),
+                content.path().canonicalize()?
+            );
+        }
+        controller.initialize_workspace().await?;
+        controller.scan().await?;
+        let files = controller.list_files(None, "photo").await?;
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files.first().context("missing scanned file")?.path(),
+            content.path().canonicalize()?.join("photo.txt")
+        );
         Ok(())
     }
 

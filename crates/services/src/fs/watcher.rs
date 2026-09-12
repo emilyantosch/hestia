@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use events::{FileEvent, FolderEvent};
 use hash::{ContentDigest, FilesystemObjectId};
+use itertools::Itertools;
 use model::services::CanonPath;
 use notify::event::{CreateKind, EventKind, RemoveKind};
 use notify::{RecommendedWatcher, RecursiveMode};
@@ -302,9 +303,14 @@ impl FileWatcher {
 }
 
 async fn to_file_or_folder_event_and_send(
-    event: DebouncedEvent,
+    mut event: DebouncedEvent,
     processed_event_tx: &Sender<FSEvent>,
 ) -> Result<()> {
+    event.paths = event
+        .paths
+        .iter()
+        .map(|path| model::services::indexed_path(path))
+        .try_collect()?;
     let path = event
         .paths
         .last()
