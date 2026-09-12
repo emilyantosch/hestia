@@ -37,8 +37,8 @@ impl TryFrom<files::Model> for FileSystemFile {
 
 impl FileSystemFile {
     pub async fn create_file_info_from_path(path: &Path) -> Result<Self> {
-        path.to_str()
-            .with_context(|| format!("path {} is not valid UTF-8", path.display()))?;
+        let path = super::IndexedPath::try_from(path)?;
+        let path = path.as_ref();
         let name = path
             .file_name()
             .and_then(|name| name.to_str())

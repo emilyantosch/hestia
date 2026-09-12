@@ -62,6 +62,8 @@
             ];
             NIX_SHELL = "hestia";
             QMAKE = qmake;
+            # cxx-qt needs the framework search path for Qt headers on macOS.
+            CXXFLAGS = lib.optionalString stdenv.hostPlatform.isDarwin "-F${qt}/lib";
             QML_IMPORT_PATH = "${qt}/lib/qt-6/qml";
             QML2_IMPORT_PATH = "${qt}/lib/qt-6/qml";
           };

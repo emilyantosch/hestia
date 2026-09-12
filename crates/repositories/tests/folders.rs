@@ -12,7 +12,8 @@ use std::sync::Arc;
 #[tokio::test]
 async fn roots_and_nested_folders_persist_by_location_and_object() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let root = directory.path();
+    let canonical_root = directory.path().canonicalize()?;
+    let root = canonical_root.as_path();
     let nested = root.join("nested");
     tokio::fs::create_dir(&nested).await?;
     let unreadable = nested.join("unreadable.txt");
@@ -33,7 +34,11 @@ async fn roots_and_nested_folders_persist_by_location_and_object() -> Result<()>
     Migrator::up(database.get_connection().as_ref(), None).await?;
     let repository = FileRepository::new(Arc::clone(&database));
 
-    repository.upsert_root_folders(vec![root.into()]).await?;
+    let alias = root.join("root-alias");
+    std::os::unix::fs::symlink(root, &alias)?;
+    repository
+        .upsert_root_folders(vec![model::services::CanonPath::try_from(alias)?])
+        .await?;
     let report = repository
         .batch_upsert_folders(vec![FileSystemFolder::create_folder_info(&nested).await?])
         .await?;
@@ -43,7 +48,7 @@ async fn roots_and_nested_folders_persist_by_location_and_object() -> Result<()>
         .find_root_folders(Some(database.get_connection().as_ref()))
         .await?;
     let root = roots.first().context("watched root was not persisted")?;
-    assert_eq!(root.path, directory.path().to_string_lossy());
+    assert_eq!(root.path, canonical_root.to_string_lossy());
     assert_eq!(root.parent_folder_id, None);
     assert_eq!(
         (root.device_id, root.inode),
@@ -57,10 +62,7 @@ async fn roots_and_nested_folders_persist_by_location_and_object() -> Result<()>
     let nested = nested_folders
         .first()
         .context("nested folder was not persisted")?;
-    assert_eq!(
-        nested.path,
-        directory.path().join("nested").to_string_lossy()
-    );
+    assert_eq!(nested.path, canonical_root.join("nested").to_string_lossy());
     assert_eq!(nested.parent_folder_id, Some(root.id));
     assert_eq!(
         (nested.device_id, nested.inode),

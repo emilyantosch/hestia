@@ -13,6 +13,7 @@ events = { workspace = true }
 hash = { workspace = true }
 image = { workspace = true }
 infer = { workspace = true }
+itertools = { workspace = true }
 model = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
