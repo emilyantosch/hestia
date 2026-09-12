@@ -98,7 +98,7 @@ impl FileRepository {
             .with_context(|| format!("folder {} has no parent", folder_path.display()))?;
 
         let parent_folder_model = Folders::find()
-            .filter(folders::Column::Path.eq(Self::utf8_path(parent_folder_path)?))
+            .filter(folders::Column::Path.eq(Self::database_path(parent_folder_path)?))
             .one(transaction)
             .await?;
 
@@ -137,7 +137,7 @@ impl FileRepository {
         C: ConnectionTrait,
     {
         let folder_info = Folder::create_folder_info(path.as_ref()).await?;
-        let path = Self::utf8_path(path.as_ref())?;
+        let path = Self::database_path(path.as_ref())?;
         let (device_id, inode) = Self::database_object_id(folder_info.filesystem_object_id)?;
         let existing = Folders::find()
             .filter(folders::Column::Path.eq(&path))
@@ -237,7 +237,7 @@ impl FileRepository {
             .and_then(|name| name.to_str())
             .with_context(|| format!("path {} has no valid folder name", folder_path.display()))?
             .to_string();
-        let path = Self::utf8_path(folder_path)?;
+        let path = Self::database_path(folder_path)?;
         let filesystem_object_id = event
             .filesystem_object_id
             .context("cannot upsert a folder event without a filesystem object ID")?;
@@ -260,7 +260,7 @@ impl FileRepository {
                 .first()
                 .context("rename event does not contain its old path")?;
             Folders::find()
-                .filter(folders::Column::Path.eq(Self::utf8_path(old_path)?))
+                .filter(folders::Column::Path.eq(Self::database_path(old_path)?))
                 .one(&transaction)
                 .await?
         } else {
@@ -309,7 +309,7 @@ impl FileRepository {
             .and_then(|name| name.to_str())
             .with_context(|| format!("path {} has no valid file name", file_path.display()))?
             .to_string();
-        let path = Self::utf8_path(file_path)?;
+        let path = Self::database_path(file_path)?;
         let file_type_id = self
             .get_or_create_file_type(file_path, &transaction)
             .await?;
@@ -336,7 +336,7 @@ impl FileRepository {
                 .first()
                 .context("rename event does not contain its old path")?;
             Files::find()
-                .filter(files::Column::Path.eq(Self::utf8_path(old_path)?))
+                .filter(files::Column::Path.eq(Self::database_path(old_path)?))
                 .one(&transaction)
                 .await?
         } else {
@@ -376,7 +376,7 @@ impl FileRepository {
     /// Delete a file record from the database
     pub async fn delete_file_by_path(&self, file_path: &Path) -> Result<bool> {
         tracing::info!("FileOperations: Deleting path {file_path:#?} from database");
-        let path = Self::utf8_path(file_path)?;
+        let path = Self::database_path(file_path)?;
         let connection = self.database_manager.get_connection();
 
         let result = Files::delete_many()
@@ -389,7 +389,7 @@ impl FileRepository {
 
     /// Delete a file record from the database
     pub async fn delete_folder_by_path(&self, folder_path: &Path) -> Result<bool> {
-        let path_str = Self::utf8_path(folder_path)?;
+        let path_str = Self::database_path(folder_path)?;
         let connection = self.database_manager.get_connection();
 
         let result = Folders::delete_many()
@@ -491,7 +491,7 @@ impl FileRepository {
         }
     }
 
-    fn utf8_path(path: &Path) -> Result<String> {
+    fn database_path(path: &Path) -> Result<String> {
         let path = model::services::indexed_path(path)?;
         Ok(path
             .to_str()
@@ -514,7 +514,7 @@ impl FileRepository {
 
     /// Get file by path
     pub async fn get_file_by_path(&self, file_path: &Path) -> Result<Option<files::Model>> {
-        let path = Self::utf8_path(file_path)?;
+        let path = Self::database_path(file_path)?;
         let connection = self.database_manager.get_connection();
 
         let files = Files::find()
@@ -526,7 +526,7 @@ impl FileRepository {
 
     /// Get all files in a directory
     pub async fn get_db_files_in_directory(&self, dir_path: &Path) -> Result<Vec<files::Model>> {
-        let pattern = format!("{}%", Self::utf8_path(dir_path)?);
+        let pattern = format!("{}%", Self::database_path(dir_path)?);
         let connection = self.database_manager.get_connection();
 
         Files::find()
@@ -608,13 +608,6 @@ impl FileRepository {
 
     /// Batch insert/update files with transaction
     pub async fn batch_upsert_files(&self, files: Vec<File>) -> Result<UpsertFileBatchReport> {
-        if files.is_empty() {
-            return Ok(UpsertFileBatchReport {
-                file_inserted: 0,
-                file_updated: 0,
-            });
-        }
-
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
         let mut file_inserted = 0;
@@ -624,7 +617,7 @@ impl FileRepository {
             let file_type_id = self
                 .get_or_create_file_type_cached(&file_info.file_type_name, &transaction)
                 .await?;
-            let path = Self::utf8_path(&file_info.path)?;
+            let path = Self::database_path(&file_info.path)?;
             let (device_id, inode) = Self::database_object_id(file_info.filesystem_object_id)?;
             let existing_file = Files::find()
                 .filter(files::Column::Path.eq(&path))
@@ -686,7 +679,7 @@ impl FileRepository {
             let parent_folder_id = self
                 .find_parent_folder_id(&folder.path, &transaction)
                 .await?;
-            let path = Self::utf8_path(&folder.path)?;
+            let path = Self::database_path(&folder.path)?;
             let (device_id, inode) = Self::database_object_id(folder.filesystem_object_id)?;
             let existing = Folders::find()
                 .filter(folders::Column::Path.eq(&path))
@@ -734,7 +727,7 @@ impl FileRepository {
 
         let path_strings = paths
             .iter()
-            .map(|path| Self::utf8_path(path))
+            .map(|path| Self::database_path(path))
             .collect::<Result<Vec<_>>>()?;
 
         let connection = self.database_manager.get_connection();
@@ -754,7 +747,7 @@ impl FileRepository {
 
         let path_strings = paths
             .iter()
-            .map(|path| Self::utf8_path(path))
+            .map(|path| Self::database_path(path))
             .collect::<Result<Vec<_>>>()?;
 
         let connection = self.database_manager.get_connection();
@@ -956,8 +949,8 @@ impl FileRepository {
     fn get_folder_filter_condition(filter: &FolderFilter) -> Result<Condition> {
         let mut condition = Condition::any();
         for folder in &filter.folders {
-            condition =
-                condition.add(files::Column::Path.like(format!("{}%", Self::utf8_path(folder)?)));
+            condition = condition
+                .add(files::Column::Path.like(format!("{}%", Self::database_path(folder)?)));
         }
         Ok(condition)
     }

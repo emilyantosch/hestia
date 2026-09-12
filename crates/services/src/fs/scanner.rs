@@ -164,29 +164,16 @@ impl DirectoryScanner {
         //to make it more ergonomic in the future
         for operation in operations {
             match operation {
-                SyncOperation::InsertFile(file_info) => {
+                SyncOperation::InsertFile(file_info) | SyncOperation::UpdateFile(file_info) => {
                     upsert_file_batch.push(file_info);
                     if upsert_file_batch.len() >= self.config.batch_size {
                         self.execute_upsert_file_batch(&mut upsert_file_batch, &mut report)
                             .await;
                     }
                 }
-                SyncOperation::InsertFolder(folder_info) => {
+                SyncOperation::InsertFolder(folder_info)
+                | SyncOperation::UpdateFolder(folder_info) => {
                     upsert_folder_batch.push(folder_info);
-                    if upsert_folder_batch.len() >= self.config.batch_size {
-                        self.execute_upsert_folder_batch(&mut upsert_folder_batch, &mut report)
-                            .await;
-                    }
-                }
-                SyncOperation::UpdateFile(file_info) => {
-                    upsert_file_batch.push(file_info); // Upsert handles both insert and update
-                    if upsert_file_batch.len() >= self.config.batch_size {
-                        self.execute_upsert_file_batch(&mut upsert_file_batch, &mut report)
-                            .await;
-                    }
-                }
-                SyncOperation::UpdateFolder(folder_info) => {
-                    upsert_folder_batch.push(folder_info); // Upsert handles both insert and update
                     if upsert_folder_batch.len() >= self.config.batch_size {
                         self.execute_upsert_folder_batch(&mut upsert_folder_batch, &mut report)
                             .await;
@@ -210,25 +197,14 @@ impl DirectoryScanner {
         }
 
         // Execute remaining batches
-        if !upsert_file_batch.is_empty() {
-            self.execute_upsert_file_batch(&mut upsert_file_batch, &mut report)
-                .await;
-        }
-
-        if !upsert_folder_batch.is_empty() {
-            self.execute_upsert_folder_batch(&mut upsert_folder_batch, &mut report)
-                .await;
-        }
-
-        if !delete_file_batch.is_empty() {
-            self.execute_delete_file_batch(&mut delete_file_batch, &mut report)
-                .await;
-        }
-
-        if !delete_folder_batch.is_empty() {
-            self.execute_delete_folder_batch(&mut delete_file_batch, &mut report)
-                .await;
-        }
+        self.execute_upsert_file_batch(upsert_file_batch, &mut report)
+            .await;
+        self.execute_upsert_folder_batch(&mut upsert_folder_batch, &mut report)
+            .await;
+        self.execute_delete_file_batch(&mut delete_file_batch, &mut report)
+            .await;
+        self.execute_delete_folder_batch(&mut delete_folder_batch, &mut report)
+            .await;
         report.duration = start_time.elapsed();
 
         //NOTE: This could be removed in the future if I do not find any worth in it
@@ -396,25 +372,16 @@ impl DirectoryScanner {
 
     /// Execute a batch of insert/update operations
     async fn execute_upsert_file_batch(&self, batch: &mut Vec<File>, report: &mut SyncReport) {
-        if batch.is_empty() {
-            return;
-        }
-
-        match self.file_operations.batch_upsert_files(batch.clone()).await {
-            Ok(file_report) => {
-                report.files_inserted += file_report.file_inserted; // Note: this includes both inserts and updates
-                report.files_updated += file_report.file_updated; // Note: this includes both inserts and updates
-                tracing::info!(
-                    "Successfully processed batch of {} files",
-                    file_report.file_inserted + file_report.file_updated
-                );
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to execute insert batch: {e:?}");
-                report.errors.push(error_msg);
-                tracing::error!("Batch insert failed: {:?}", e);
-            }
-        }
+        self.file_operations
+            .batch_upsert_files(batch.clone())
+            .await
+            .inspect(|x| {
+                report.files_inserted += x.file_inserted;
+                report.files_updated += x.file_updated;
+            })
+            .inspect_err(|error| {
+                report.errors.push(error.to_string());
+            });
         batch.clear();
     }
 
