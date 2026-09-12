@@ -9,9 +9,9 @@ use hash::file_id::FileId;
 use hash::{ContentDigest, FilesystemObjectId};
 use model::commands::filter::{Filter, FolderFilter, TagFilter};
 use model::commands::watched_folders::WatchedFolderTree;
-use model::services::CanonPath;
 use model::services::file::{FileSystemFile as File, PersistedFile};
 use model::services::folder::FileSystemFolder as Folder;
+use model::services::{CanonPath, IndexedPath};
 use notify::EventKind;
 use notify::event::{ModifyKind, RenameMode};
 use sea_orm::ActiveValue::Set;
@@ -81,14 +81,15 @@ impl FileRepository {
     //library root folders
     pub async fn find_parent_folder_id<C: ConnectionTrait>(
         &self,
-        folder_path: &Path,
+        folder_path: &IndexedPath,
         transaction: &C,
     ) -> Result<Option<i32>> {
-        let folder_path = model::services::indexed_path(folder_path)?;
+        let folder_path = folder_path.as_ref();
         if self
             .find_root_folder_paths(transaction)
             .await?
-            .contains(&folder_path)
+            .iter()
+            .any(|root| root == folder_path)
         {
             return Ok(None);
         }
@@ -230,20 +231,20 @@ impl FileRepository {
             .paths
             .last()
             .context("cannot upsert a folder event without a path")?;
-        let folder_path = model::services::indexed_path(folder_path)?;
-        let folder_path = &folder_path;
+        let indexed_path = IndexedPath::try_from(folder_path.as_path())?;
+        let folder_path = indexed_path.as_ref();
         let folder_name = folder_path
             .file_name()
             .and_then(|name| name.to_str())
             .with_context(|| format!("path {} has no valid folder name", folder_path.display()))?
             .to_string();
-        let path = Self::database_path(folder_path)?;
+        let path = indexed_path.as_str().to_owned();
         let filesystem_object_id = event
             .filesystem_object_id
             .context("cannot upsert a folder event without a filesystem object ID")?;
         let (device_id, inode) = Self::database_object_id(filesystem_object_id)?;
         let parent_folder_id = self
-            .find_parent_folder_id(folder_path, &transaction)
+            .find_parent_folder_id(&indexed_path, &transaction)
             .await?;
         let existing = Folders::find()
             .filter(folders::Column::Path.eq(&path))
@@ -302,14 +303,14 @@ impl FileRepository {
             .paths
             .last()
             .context("cannot upsert a file event without a path")?;
-        let file_path = model::services::indexed_path(file_path)?;
-        let file_path = &file_path;
+        let indexed_path = IndexedPath::try_from(file_path.as_path())?;
+        let file_path = indexed_path.as_ref();
         let file_name = file_path
             .file_name()
             .and_then(|name| name.to_str())
             .with_context(|| format!("path {} has no valid file name", file_path.display()))?
             .to_string();
-        let path = Self::database_path(file_path)?;
+        let path = indexed_path.as_str().to_owned();
         let file_type_id = self
             .get_or_create_file_type(file_path, &transaction)
             .await?;
@@ -492,11 +493,7 @@ impl FileRepository {
     }
 
     fn database_path(path: &Path) -> Result<String> {
-        let path = model::services::indexed_path(path)?;
-        Ok(path
-            .to_str()
-            .context("indexed path is not valid UTF-8")?
-            .to_owned())
+        Ok(IndexedPath::try_from(path)?.as_str().to_owned())
     }
 
     fn database_object_id(object_id: FilesystemObjectId) -> Result<(i64, i64)> {
@@ -677,7 +674,7 @@ impl FileRepository {
 
         for folder in folders {
             let parent_folder_id = self
-                .find_parent_folder_id(&folder.path, &transaction)
+                .find_parent_folder_id(&IndexedPath::try_from(folder.path.as_path())?, &transaction)
                 .await?;
             let path = Self::database_path(&folder.path)?;
             let (device_id, inode) = Self::database_object_id(folder.filesystem_object_id)?;

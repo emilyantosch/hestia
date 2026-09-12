@@ -197,7 +197,7 @@ impl DirectoryScanner {
         }
 
         // Execute remaining batches
-        self.execute_upsert_file_batch(upsert_file_batch, &mut report)
+        self.execute_upsert_file_batch(&mut upsert_file_batch, &mut report)
             .await;
         self.execute_upsert_folder_batch(&mut upsert_folder_batch, &mut report)
             .await;
@@ -372,16 +372,13 @@ impl DirectoryScanner {
 
     /// Execute a batch of insert/update operations
     async fn execute_upsert_file_batch(&self, batch: &mut Vec<File>, report: &mut SyncReport) {
-        self.file_operations
-            .batch_upsert_files(batch.clone())
-            .await
-            .inspect(|x| {
-                report.files_inserted += x.file_inserted;
-                report.files_updated += x.file_updated;
-            })
-            .inspect_err(|error| {
-                report.errors.push(error.to_string());
-            });
+        match self.file_operations.batch_upsert_files(batch.clone()).await {
+            Ok(result) => {
+                report.files_inserted += result.file_inserted;
+                report.files_updated += result.file_updated;
+            }
+            Err(error) => report.errors.push(error.to_string()),
+        }
         batch.clear();
     }
 
@@ -395,19 +392,11 @@ impl DirectoryScanner {
             .batch_upsert_folders(batch.clone())
             .await
         {
-            Ok(folder_report) => {
-                report.folders_inserted += folder_report.folder_inserted;
-                report.folders_updated += folder_report.folder_updated;
-                tracing::info!(
-                    "Successfully processed batch of {} files",
-                    folder_report.folder_inserted + folder_report.folder_updated
-                );
+            Ok(result) => {
+                report.folders_inserted += result.folder_inserted;
+                report.folders_updated += result.folder_updated;
             }
-            Err(e) => {
-                let error_msg = format!("Failed to execute insert batch: {e:?}");
-                report.errors.push(error_msg);
-                tracing::error!("Batch insert failed: {:?}", e);
-            }
+            Err(error) => report.errors.push(error.to_string()),
         }
 
         batch.clear();
@@ -420,15 +409,8 @@ impl DirectoryScanner {
         }
 
         match self.file_operations.batch_delete_files(batch.clone()).await {
-            Ok(count) => {
-                report.files_deleted += count;
-                tracing::info!("Successfully deleted {} files from database", count);
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to execute delete batch: {e:?}");
-                report.errors.push(error_msg);
-                tracing::error!("Batch delete failed: {:?}", e);
-            }
+            Ok(count) => report.files_deleted += count,
+            Err(error) => report.errors.push(error.to_string()),
         }
         batch.clear();
     }
@@ -444,15 +426,8 @@ impl DirectoryScanner {
             .batch_delete_folders(batch.clone())
             .await
         {
-            Ok(count) => {
-                report.folders_deleted += count;
-                tracing::info!("Successfully deleted {} files from database", count);
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to execute delete batch: {e:?}");
-                report.errors.push(error_msg);
-                tracing::error!("Batch delete failed: {:?}", e);
-            }
+            Ok(count) => report.folders_deleted += count,
+            Err(error) => report.errors.push(error.to_string()),
         }
         batch.clear();
     }

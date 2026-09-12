@@ -309,7 +309,9 @@ async fn to_file_or_folder_event_and_send(
     event.paths = event
         .paths
         .iter()
-        .map(|path| model::services::indexed_path(path))
+        .map(|path| {
+            model::services::IndexedPath::try_from(path.as_path()).map(std::path::PathBuf::from)
+        })
         .try_collect()?;
     let path = event
         .paths

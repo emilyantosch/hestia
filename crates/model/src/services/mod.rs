@@ -12,24 +12,54 @@ pub mod thumbnail;
 
 /// Absolute UTF-8 entry key. Resolve roots with `CanonPath` first; child symlinks
 /// stay at their indexed locations. This also works after an entry is deleted.
-pub fn indexed_path(path: &Path) -> Result<PathBuf> {
-    ensure!(!path.as_os_str().is_empty(), "indexed path cannot be empty");
-    path.to_str().context("indexed path is not valid UTF-8")?;
-    let absolute = std::path::absolute(path)?;
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => (),
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            component => normalized.push(component.as_os_str()),
-        }
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexedPath {
+    path: String,
+}
+
+impl IndexedPath {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.path
     }
-    normalized
-        .to_str()
-        .context("indexed path is not valid UTF-8")?;
-    Ok(normalized)
+}
+
+impl AsRef<Path> for IndexedPath {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.path)
+    }
+}
+
+impl From<IndexedPath> for PathBuf {
+    fn from(path: IndexedPath) -> Self {
+        Self::from(path.path)
+    }
+}
+
+impl TryFrom<&Path> for IndexedPath {
+    type Error = anyhow::Error;
+
+    fn try_from(path: &Path) -> Result<Self> {
+        ensure!(!path.as_os_str().is_empty(), "indexed path cannot be empty");
+        path.to_str().context("indexed path is not valid UTF-8")?;
+        let absolute = std::path::absolute(path)?;
+        let mut normalized = PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                Component::CurDir => (),
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                component => normalized.push(component.as_os_str()),
+            }
+        }
+        Ok(Self {
+            path: normalized
+                .into_os_string()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("indexed path is not valid UTF-8"))?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -48,7 +78,7 @@ impl TryFrom<PathBuf> for CanonPath {
     type Error = anyhow::Error;
     fn try_from(path: PathBuf) -> Result<CanonPath> {
         Ok(CanonPath {
-            path: indexed_path(&path.canonicalize()?)?,
+            path: IndexedPath::try_from(path.canonicalize()?.as_path())?.into(),
         })
     }
 }
@@ -78,7 +108,7 @@ impl CanonPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{CanonPath, indexed_path};
+    use super::{CanonPath, IndexedPath};
     use anyhow::Result;
     use std::path::Path;
 
@@ -86,14 +116,18 @@ mod tests {
     fn entry_keys_are_absolute_lexical_and_do_not_require_existence() -> Result<()> {
         let cwd = std::env::current_dir()?;
         assert_eq!(
-            indexed_path(Path::new("./missing/../entry"))?,
+            IndexedPath::try_from(Path::new("./missing/../entry"))?.as_ref(),
             cwd.join("entry")
         );
         assert_eq!(
-            indexed_path(Path::new("/../../entry/./"))?,
+            IndexedPath::try_from(Path::new("/../../entry/./"))?.as_ref(),
             Path::new("/entry")
         );
-        assert!(indexed_path(Path::new("")).is_err());
+        assert_eq!(
+            IndexedPath::try_from(Path::new("/entry"))?.as_str(),
+            "/entry"
+        );
+        assert!(IndexedPath::try_from(Path::new("")).is_err());
         assert!(CanonPath::try_from(cwd.join("missing/entry")).is_err());
         Ok(())
     }
@@ -102,6 +136,8 @@ mod tests {
     #[test]
     fn entry_keys_reject_non_utf8() {
         use std::os::unix::ffi::OsStrExt;
-        assert!(indexed_path(Path::new(std::ffi::OsStr::from_bytes(b"/bad\xff"))).is_err());
+        assert!(
+            IndexedPath::try_from(Path::new(std::ffi::OsStr::from_bytes(b"/bad\xff"))).is_err()
+        );
     }
 }
