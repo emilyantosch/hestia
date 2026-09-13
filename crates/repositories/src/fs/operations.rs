@@ -13,6 +13,7 @@ use model::commands::watched_folders::WatchedFolderTree;
 use model::services::file::{FileSystemFile as File, PersistedFile};
 use model::services::folder::FileSystemFolder as Folder;
 use model::services::{CanonPath, IndexedPath};
+use moka::sync::Cache;
 use notify::EventKind;
 use notify::event::{ModifyKind, RenameMode};
 use sea_orm::ActiveValue::Set;
@@ -22,7 +23,7 @@ use sea_orm::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::manager::DatabaseManager;
 use crate::thumbnail::operations::ThumbnailOperations;
@@ -55,7 +56,7 @@ pub struct UpsertFolderBatchReport {
 #[derive(Debug)]
 pub struct FileRepository {
     database_manager: Arc<DatabaseManager>,
-    file_type_cache: Arc<RwLock<HashMap<String, i32>>>,
+    file_type_cache: Cache<String, i32>,
     thumbnail_repository: ThumbnailOperations,
 }
 
@@ -66,7 +67,7 @@ impl FileRepository {
 
         Self {
             database_manager,
-            file_type_cache: Arc::new(RwLock::new(HashMap::new())),
+            file_type_cache: Cache::new(1_024),
             thumbnail_repository,
         }
     }
@@ -312,8 +313,9 @@ impl FileRepository {
             .with_context(|| format!("path {} has no valid file name", file_path.display()))?
             .to_string();
         let path = indexed_path.as_str().to_owned();
+        let file_type_name = Self::detect_file_type(file_path);
         let file_type_id = self
-            .get_or_create_file_type(file_path, &transaction)
+            .get_or_create_file_type_cached(&file_type_name, &transaction)
             .await?;
         let content_digest = event
             .content_digest
@@ -372,6 +374,7 @@ impl FileRepository {
         };
 
         transaction.commit().await?;
+        self.file_type_cache.insert(file_type_name, file_type_id);
         Ok(file_model)
     }
 
@@ -386,6 +389,7 @@ impl FileRepository {
             .exec(&*connection)
             .await?;
 
+        self.database_manager.invalidate_thumbnail_cache();
         Ok(result.rows_affected > 0)
     }
 
@@ -398,35 +402,9 @@ impl FileRepository {
             .filter(folders::Column::Path.eq(&path_str))
             .exec(&*connection)
             .await?;
+        self.database_manager.invalidate_thumbnail_cache();
 
         Ok(result.rows_affected > 0)
-    }
-
-    /// Get or create a file type based on file extension
-    async fn get_or_create_file_type<C>(&self, file_path: &Path, connection: &C) -> Result<i32>
-    where
-        C: ConnectionTrait,
-    {
-        let file_type_name = Self::detect_file_type(file_path);
-
-        // Check if file type already exists
-        if let Some(existing_type) = FileTypes::find()
-            .filter(file_types::Column::Name.eq(&file_type_name))
-            .one(connection)
-            .await?
-        {
-            return Ok(existing_type.id);
-        }
-
-        // Create new file type
-        let new_file_type = file_types::ActiveModel {
-            id: sea_orm::ActiveValue::NotSet,
-            name: Set(file_type_name),
-        };
-
-        let created_type = new_file_type.insert(connection).await?;
-
-        Ok(created_type.id)
     }
 
     /// Detect file type based on file extension
@@ -610,11 +588,18 @@ impl FileRepository {
         let transaction = connection.begin().await?;
         let mut file_inserted = 0;
         let mut file_updated = 0;
+        let mut pending_types = HashMap::new();
 
         for file_info in files {
-            let file_type_id = self
-                .get_or_create_file_type_cached(&file_info.file_type_name, &transaction)
-                .await?;
+            let file_type_id = if let Some(&id) = pending_types.get(&file_info.file_type_name) {
+                id
+            } else {
+                let id = self
+                    .get_or_create_file_type_cached(&file_info.file_type_name, &transaction)
+                    .await?;
+                pending_types.insert(file_info.file_type_name.clone(), id);
+                id
+            };
             let path = Self::database_path(&file_info.path)?;
             let (device_id, inode) = Self::database_object_id(file_info.filesystem_object_id)?;
             let existing_file = Files::find()
@@ -651,6 +636,9 @@ impl FileRepository {
         }
 
         transaction.commit().await?;
+        for (name, id) in pending_types {
+            self.file_type_cache.insert(name, id);
+        }
         Ok(UpsertFileBatchReport {
             file_inserted,
             file_updated,
@@ -734,6 +722,7 @@ impl FileRepository {
             .exec(&*connection)
             .await?;
 
+        self.database_manager.invalidate_thumbnail_cache();
         Ok(result.rows_affected as usize)
     }
 
@@ -754,15 +743,13 @@ impl FileRepository {
             .exec(&*connection)
             .await?;
 
+        self.database_manager.invalidate_thumbnail_cache();
         Ok(result.rows_affected as usize)
     }
 
     /// Clear file type cache (useful for testing or cache invalidation)
     pub fn clear_file_type_cache(&self) {
-        self.file_type_cache
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        self.file_type_cache.invalidate_all();
     }
 
     /// Get or create file type with caching
@@ -774,32 +761,13 @@ impl FileRepository {
     where
         C: ConnectionTrait,
     {
-        // Check cache first
-        {
-            let cache = self
-                .file_type_cache
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(&type_id) = cache.get(file_type_name) {
-                return Ok(type_id);
-            }
+        if let Some(type_id) = self.file_type_cache.get(file_type_name) {
+            return Ok(type_id);
         }
 
-        // Not in cache, get or create from database
-        let type_id = self
-            .get_or_create_file_type_by_name(file_type_name, connection)
-            .await?;
-
-        // Update cache
-        {
-            let mut cache = self
-                .file_type_cache
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            cache.insert(file_type_name.to_string(), type_id);
-        }
-
-        Ok(type_id)
+        // The caller publishes the ID only after its transaction commits.
+        self.get_or_create_file_type_by_name(file_type_name, connection)
+            .await
     }
 
     /// Get or create file type by name (without path inference)
@@ -811,7 +779,6 @@ impl FileRepository {
     where
         C: ConnectionTrait,
     {
-        // Check if file type already exists
         if let Some(existing_type) = FileTypes::find()
             .filter(file_types::Column::Name.eq(file_type_name))
             .one(connection)
@@ -820,7 +787,6 @@ impl FileRepository {
             return Ok(existing_type.id);
         }
 
-        // Create new file type
         let new_file_type = file_types::ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
             name: Set(file_type_name.to_string()),
@@ -901,23 +867,13 @@ impl FileRepository {
         let connection = self.database_manager.get_connection();
         let all_types = FileTypes::find().all(&*connection).await?;
 
-        let mut cache = self
-            .file_type_cache
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for file_type in all_types {
-            cache.insert(file_type.name, file_type.id);
+            self.file_type_cache.insert(file_type.name, file_type.id);
         }
 
         Ok(())
     }
 
-    /*
-     * SELECT name
-     * FROM files f
-     * LEFT JOIN file_has_tags fht ON fht.file_id = f.id
-     * WHERE fht.id = tag.id AND fht.id = tag.id AND (f.path like folderPath% OR f.path like folderPath%)
-     */
     pub async fn get_files_for_filter(&self, filter: Filter) -> Result<Vec<files::Model>> {
         let connection = self.database_manager.get_connection();
         let mut folder_condition: Condition = Condition::any();
@@ -935,13 +891,13 @@ impl FileRepository {
             }
             (None, None) => (),
         }
-        let files = Files::find()
+        Files::find()
             .left_join(file_has_tags::Entity)
             .filter(folder_condition)
             .filter(tag_condition)
             .all(&*connection)
-            .await?;
-        Ok(files)
+            .await
+            .context("Could not get files for filter")
     }
 
     fn get_folder_filter_condition(filter: &FolderFilter) -> Result<Condition> {
@@ -965,10 +921,10 @@ impl FileRepository {
     where
         C: ConnectionTrait,
     {
-        let root_folders = Folders::find()
+        Folders::find()
             .filter(folders::Column::ParentFolderId.is_null())
             .all(transaction)
-            .await?;
-        Ok(root_folders)
+            .await
+            .context("Could not find root folders")
     }
 }

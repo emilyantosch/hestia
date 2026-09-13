@@ -8,6 +8,54 @@ use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 use std::sync::Arc;
 
 #[tokio::test]
+async fn failed_file_batch_does_not_cache_uncommitted_type_ids() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("original.txt");
+    tokio::fs::write(&path, b"original").await?;
+    let original = FileSystemFile::create_file_info_from_path(&path).await?;
+    let mut invalid = original.clone();
+    invalid.filesystem_object_id.inode = u64::MAX;
+    let database = Arc::new(
+        DatabaseManager::new(DatabaseSettings::new(
+            "sqlite::memory:".to_string(),
+            30_000,
+            SqliteJournalMode::Memory,
+            SqliteSynchronous::Normal,
+        ))
+        .await?,
+    );
+    Migrator::up(database.get_connection().as_ref(), None).await?;
+    let repository = FileRepository::new(database);
+    assert!(
+        repository
+            .batch_upsert_files(vec![original.clone(), invalid])
+            .await
+            .is_err()
+    );
+    assert!(repository.get_file_by_path(&path).await?.is_none());
+
+    // Reuse the rolled-back ID for a different type before retrying the original.
+    let other_path = directory.path().join("other.png");
+    tokio::fs::write(&other_path, b"other").await?;
+    let mut other = FileSystemFile::create_file_info_from_path(&other_path).await?;
+    other.file_type_name = "different_type".to_string();
+    repository.batch_upsert_files(vec![other]).await?;
+    repository.batch_upsert_files(vec![original]).await?;
+    let stored = repository
+        .get_file_by_path(&path)
+        .await?
+        .context("missing original")?;
+    let other = repository
+        .get_file_by_path(&other_path)
+        .await?
+        .context("missing other")?;
+    assert_ne!(stored.file_type_id, other.file_type_id);
+    repository.clear_file_type_cache();
+    repository.preload_file_type_cache().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn equal_content_and_hard_links_remain_separate_file_entries() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let original = directory.path().join("original.txt");

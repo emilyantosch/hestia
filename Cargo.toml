@@ -26,6 +26,7 @@ image = { default-features = false, features = [ "bmp", "gif", "jpeg", "png", "t
 infer = "0.19.0"
 itertools = "0.15.0"
 keyring = "3.6.2"
+moka = { features = [ "sync" ], version = "0.12" }
 notify = "8.0.0"
 notify-debouncer-full = "0.6.0"
 num_cpus = "1.17.0"

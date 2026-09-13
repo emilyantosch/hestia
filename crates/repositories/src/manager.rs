@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, ensure};
+use moka::sync::Cache;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::DatabaseSettings;
@@ -9,6 +11,8 @@ use crate::config::DatabaseSettings;
 pub struct DatabaseManager {
     connection: Arc<DatabaseConnection>,
     settings: DatabaseSettings,
+    pub(crate) thumbnail_cache: Cache<(u64, i32), Arc<Vec<entity::thumbnails::Model>>>,
+    pub(crate) thumbnail_cache_generation: AtomicU64,
 }
 
 impl DatabaseManager {
@@ -22,6 +26,25 @@ impl DatabaseManager {
         Ok(Self {
             connection: Arc::new(connection),
             settings,
+            thumbnail_cache: Cache::builder()
+                .max_capacity(64 * 1024 * 1024)
+                .weigher(
+                    |_: &(u64, i32), models: &Arc<Vec<entity::thumbnails::Model>>| {
+                        let bytes = models.iter().fold(
+                            size_of::<Vec<entity::thumbnails::Model>>(),
+                            |total, model| {
+                                total
+                                    .saturating_add(size_of::<entity::thumbnails::Model>())
+                                    .saturating_add(model.data.len())
+                                    .saturating_add(model.mime_type.len())
+                                    .saturating_add(model.size.len())
+                            },
+                        );
+                        u32::try_from(bytes).unwrap_or(u32::MAX)
+                    },
+                )
+                .build(),
+            thumbnail_cache_generation: AtomicU64::new(0),
         })
     }
 
@@ -43,6 +66,14 @@ impl DatabaseManager {
     #[must_use]
     pub fn get_settings(&self) -> &DatabaseSettings {
         &self.settings
+    }
+
+    pub(crate) fn invalidate_thumbnail_cache(&self) {
+        // A read started before a write must not repopulate the current generation.
+        self.thumbnail_cache_generation
+            .fetch_add(1, Ordering::SeqCst);
+        // ponytail: invalidate all files on writes; use per-file generations if hit rate suffers.
+        self.thumbnail_cache.invalidate_all();
     }
 
     pub async fn test_connection(&self) -> Result<()> {

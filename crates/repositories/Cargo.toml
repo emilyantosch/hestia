@@ -14,6 +14,7 @@ hash = { workspace = true }
 itertools = { workspace = true }
 library = { workspace = true }
 model = { workspace = true }
+moka = { workspace = true }
 notify = { workspace = true }
 sea-orm = { workspace = true }
 secrecy = { workspace = true }

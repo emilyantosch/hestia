@@ -1,6 +1,7 @@
 use entity::files;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
 use sea_orm::{
@@ -23,6 +24,8 @@ pub struct ThumbnailStats {
     pub total_storage_bytes: u64,
 }
 
+type FileThumbnails = Arc<Vec<thumbnails::Model>>;
+
 /// Repository for thumbnail database operations
 #[derive(Debug)]
 pub struct ThumbnailOperations {
@@ -33,6 +36,44 @@ impl ThumbnailOperations {
     #[must_use]
     pub fn new(database_manager: Arc<DatabaseManager>) -> Self {
         Self { database_manager }
+    }
+
+    /// Load all sizes per file, batching cache misses into one database query.
+    async fn cached_models_for_files(&self, mut file_ids: Vec<i32>) -> Result<Vec<FileThumbnails>> {
+        file_ids.sort_unstable();
+        file_ids.dedup();
+        let generation = self
+            .database_manager
+            .thumbnail_cache_generation
+            .load(Ordering::SeqCst);
+        let cache = &self.database_manager.thumbnail_cache;
+        let mut result = Vec::new();
+        let mut missing = Vec::new();
+        for file_id in file_ids {
+            if let Some(models) = cache.get(&(generation, file_id)) {
+                result.push(models);
+            } else {
+                missing.push(file_id);
+            }
+        }
+        if !missing.is_empty() {
+            let db = self.database_manager.get_connection();
+            let models = Thumbnails::find()
+                .filter(thumbnails::Column::FileId.is_in(missing))
+                .all(db.as_ref())
+                .await
+                .context("Failed to query thumbnails")?;
+            let mut by_file: HashMap<i32, Vec<thumbnails::Model>> = HashMap::new();
+            for model in models {
+                by_file.entry(model.file_id).or_default().push(model);
+            }
+            for (file_id, models) in by_file {
+                let models = Arc::new(models);
+                cache.insert((generation, file_id), Arc::clone(&models));
+                result.push(models);
+            }
+        }
+        Ok(result)
     }
 
     /// Create a new thumbnail entry in the database
@@ -53,6 +94,7 @@ impl ThumbnailOperations {
             .try_into_model()
             .map_err(|_| anyhow::anyhow!("Failed to convert saved thumbnail to model"))?;
 
+        self.database_manager.invalidate_thumbnail_cache();
         Ok(model)
     }
 
@@ -62,35 +104,25 @@ impl ThumbnailOperations {
         file_id: i32,
         size: ThumbnailSize,
     ) -> Result<Option<Thumbnail>> {
-        let db = self.database_manager.get_connection();
-
-        let model = Thumbnails::find()
-            .filter(thumbnails::Column::FileId.eq(file_id))
-            .filter(thumbnails::Column::Size.eq(size.to_string()))
-            .one(db.as_ref())
-            .await
-            .context("Failed to query thumbnail by file ID and size")?;
-
-        match model {
-            Some(m) => Ok(Some(Thumbnail::from_model(m)?)),
-            None => Ok(None),
-        }
+        self.cached_models_for_files(vec![file_id])
+            .await?
+            .iter()
+            .flat_map(|models| models.iter())
+            .find(|model| model.size == size.as_str())
+            .cloned()
+            .map(Thumbnail::from_model)
+            .transpose()
     }
 
     /// Get all thumbnails for a specific file
     pub async fn get_thumbnails_for_file(&self, file_id: i32) -> Result<Vec<Thumbnail>> {
-        let db = self.database_manager.get_connection();
-
-        let models = Thumbnails::find()
-            .filter(thumbnails::Column::FileId.eq(file_id))
-            .all(db.as_ref())
-            .await
-            .context("Failed to query thumbnails for file")?;
-
-        let thumbnails: Result<Vec<Thumbnail>, _> =
-            models.into_iter().map(Thumbnail::from_model).collect();
-
-        thumbnails.context("Failed to convert thumbnail models")
+        self.cached_models_for_files(vec![file_id])
+            .await?
+            .iter()
+            .flat_map(|models| models.iter())
+            .cloned()
+            .map(Thumbnail::from_model)
+            .collect()
     }
 
     /// Get thumbnail for a specific file and size
@@ -99,19 +131,9 @@ impl ThumbnailOperations {
         file_id: i32,
         size: ThumbnailSize,
     ) -> Result<Thumbnail> {
-        let db = self.database_manager.get_connection();
-
-        let model = Thumbnails::find()
-            .filter(thumbnails::Column::FileId.eq(file_id))
-            .filter(thumbnails::Column::Size.eq(size.to_string()))
-            .one(db.as_ref())
-            .await
-            .context("Failed to query thumbnails for file")?;
-
-        let model = model
-            .context("thumbnail is not in the database; it may not have been generated yet")?;
-
-        Thumbnail::from_model(model).context("Failed to convert thumbnail model")
+        self.get_by_file_and_size(file_id, size)
+            .await?
+            .context("thumbnail is not in the database; it may not have been generated yet")
     }
 
     /// Get all thumbnail for a specific range of files and sizes
@@ -120,19 +142,14 @@ impl ThumbnailOperations {
         file_id: Vec<i32>,
         size: ThumbnailSize,
     ) -> Result<Vec<Thumbnail>> {
-        let db = self.database_manager.get_connection();
-
-        let models = Thumbnails::find()
-            .filter(thumbnails::Column::FileId.is_in(file_id))
-            .filter(thumbnails::Column::Size.eq(size.to_string()))
-            .all(db.as_ref())
-            .await
-            .context("Failed to query thumbnails for file")?;
-
-        let thumbnails: Result<Vec<Thumbnail>, _> =
-            models.into_iter().map(Thumbnail::from_model).collect();
-
-        thumbnails.context("Failed to convert thumbnail models")
+        self.cached_models_for_files(file_id)
+            .await?
+            .iter()
+            .flat_map(|models| models.iter())
+            .filter(|model| model.size == size.as_str())
+            .cloned()
+            .map(Thumbnail::from_model)
+            .collect()
     }
 
     /// Delete all thumbnails for a specific file
@@ -145,6 +162,7 @@ impl ThumbnailOperations {
             .await
             .context("Failed to delete thumbnails for file")?;
 
+        self.database_manager.invalidate_thumbnail_cache();
         Ok(delete_result.rows_affected)
     }
 
@@ -152,15 +170,25 @@ impl ThumbnailOperations {
     pub async fn get_thumbnail_by_id(&self, id: i32) -> Result<Option<Thumbnail>> {
         let db = self.database_manager.get_connection();
 
-        let model = Thumbnails::find_by_id(id)
+        let file_id: Option<i32> = Thumbnails::find_by_id(id)
+            .select_only()
+            .column(thumbnails::Column::FileId)
+            .into_tuple()
             .one(db.as_ref())
             .await
             .context("Failed to query thumbnail by ID")?;
 
-        match model {
-            Some(m) => Ok(Some(Thumbnail::from_model(m)?)),
-            None => Ok(None),
-        }
+        let Some(file_id) = file_id else {
+            return Ok(None);
+        };
+        self.cached_models_for_files(vec![file_id])
+            .await?
+            .iter()
+            .flat_map(|models| models.iter())
+            .find(|model| model.id == id)
+            .cloned()
+            .map(Thumbnail::from_model)
+            .transpose()
     }
 
     /// Update or insert (upsert) a thumbnail
@@ -192,6 +220,7 @@ impl ThumbnailOperations {
                 .await
                 .context("Failed to update existing thumbnail")?;
 
+            self.database_manager.invalidate_thumbnail_cache();
             Ok(updated)
         } else {
             // Create new thumbnail
@@ -293,6 +322,7 @@ impl ThumbnailOperations {
             .await
             .context("Failed to commit batch thumbnail creation transaction")?;
 
+        self.database_manager.invalidate_thumbnail_cache();
         Ok(created_count)
     }
 
@@ -388,6 +418,7 @@ impl ThumbnailOperations {
             .await
             .context("Failed to commit batch thumbnail upsert transaction")?;
 
+        self.database_manager.invalidate_thumbnail_cache();
         Ok((created_count, updated_count))
     }
 
@@ -408,6 +439,7 @@ impl ThumbnailOperations {
             .await
             .context("Failed to delete orphaned thumbnails")?;
 
+        self.database_manager.invalidate_thumbnail_cache();
         Ok(delete_result.rows_affected)
     }
 
@@ -416,18 +448,8 @@ impl ThumbnailOperations {
         file_ids: Vec<i32>,
         size: ThumbnailSize,
     ) -> Result<Vec<Thumbnail>> {
-        let connection = self.database_manager.get_connection();
-        let thumbnails = Thumbnails::find()
-            .filter(thumbnails::Column::FileId.is_in(file_ids))
-            .filter(thumbnails::Column::Size.eq(size.to_string()))
-            .all(&*connection)
-            .await?;
-
-        Ok(thumbnails
-            .into_iter()
-            .map(TryInto::try_into)
-            .map(|x| x.unwrap())
-            .collect())
+        self.get_all_thumbnails_for_files_and_size(file_ids, size)
+            .await
     }
 }
 
