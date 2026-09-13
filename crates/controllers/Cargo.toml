@@ -7,6 +7,7 @@ version.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 entity.workspace = true
+itertools.workspace = true
 library.workspace = true
 migration.workspace = true
 model.workspace = true
