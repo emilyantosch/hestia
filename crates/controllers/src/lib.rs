@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use entity::{file_has_tags, files, folders, tags};
+use itertools::Itertools;
 use library::library::{Library, LibraryConfig, LibraryPathConfig};
 use migration::{Migrator, MigratorTrait};
 use model::services::CanonPath;
@@ -564,7 +565,7 @@ impl AppController {
             .order_by_asc(folders::Column::Name)
             .all(database_manager.get_connection().as_ref())
             .await
-            .map(|items| items.into_iter().map(Into::into).collect())
+            .map(|items| items.into_iter().map_into().collect())
             .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
     }
 
@@ -600,7 +601,7 @@ impl AppController {
             .order_by_asc(files::Column::Name)
             .all(connection.as_ref())
             .await
-            .map(|items| items.into_iter().map(Into::into).collect())
+            .map(|items| items.into_iter().map_into().collect())
             .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
     }
 
@@ -610,7 +611,7 @@ impl AppController {
             .order_by_asc(tags::Column::Name)
             .all(database_manager.get_connection().as_ref())
             .await
-            .map(|items| items.into_iter().map(Into::into).collect())
+            .map(|items| items.into_iter().map_into().collect())
             .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
     }
 

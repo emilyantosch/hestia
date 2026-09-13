@@ -7,6 +7,7 @@ use entity::{folders, prelude::Folders};
 use events::{FileEvent, FolderEvent};
 use hash::file_id::FileId;
 use hash::{ContentDigest, FilesystemObjectId};
+use itertools::Itertools;
 use model::commands::filter::{Filter, FolderFilter, TagFilter};
 use model::commands::watched_folders::WatchedFolderTree;
 use model::services::file::{FileSystemFile as File, PersistedFile};
@@ -722,10 +723,10 @@ impl FileRepository {
             return Ok(0);
         }
 
-        let path_strings = paths
+        let path_strings: Vec<_> = paths
             .iter()
             .map(|path| Self::database_path(path))
-            .collect::<Result<Vec<_>>>()?;
+            .try_collect()?;
 
         let connection = self.database_manager.get_connection();
         let result = Files::delete_many()
@@ -742,10 +743,10 @@ impl FileRepository {
             return Ok(0);
         }
 
-        let path_strings = paths
+        let path_strings: Vec<_> = paths
             .iter()
             .map(|path| Self::database_path(path))
-            .collect::<Result<Vec<_>>>()?;
+            .try_collect()?;
 
         let connection = self.database_manager.get_connection();
         let result = Folders::delete_many()

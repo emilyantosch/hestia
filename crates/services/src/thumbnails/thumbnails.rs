@@ -1,5 +1,6 @@
 use crate::thumbnails::generator::ThumbnailGenerator;
 use anyhow::{Context, Result};
+use itertools::Itertools;
 use model::services::file::FileSystemFile as File;
 use model::services::thumbnail::ThumbnailSize;
 use repositories::thumbnail::operations::ThumbnailOperations;
@@ -420,51 +421,49 @@ impl ThumbnailProcessor {
         let mut queue = self.job_queue.lock().await;
         let mut queued_count = 0;
 
-        for file_info in file_infos {
-            for &size in &sizes {
-                let file_id = file_info
-                    .id
-                    .context("file ID for thumbnail generation was not provided")?;
-                // Check if thumbnail already exists
-                match self.repository.get_by_file_and_size(file_id, size).await {
-                    Ok(Some(_)) => {
-                        tracing::debug!(
-                            "Thumbnail already exists for file {} size {:?}",
-                            file_id,
-                            size
-                        );
-                    }
-                    Ok(None) => {
-                        // Need to generate thumbnail
-                        let job = ThumbnailJob {
-                            file_id,
-                            file_path: file_info.path.clone(),
-                            size,
-                            status: ThumbnailJobStatus::Pending,
-                            created_at: Instant::now(),
-                            retry_count: 0,
-                        };
-                        queue.push(job);
-                        queued_count += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to check existing thumbnail for file {}: {}",
-                            file_id,
-                            e
-                        );
-                        // Queue anyway to be safe
-                        let job = ThumbnailJob {
-                            file_id,
-                            file_path: file_info.path.clone(),
-                            size,
-                            status: ThumbnailJobStatus::Pending,
-                            created_at: Instant::now(),
-                            retry_count: 0,
-                        };
-                        queue.push(job);
-                        queued_count += 1;
-                    }
+        for (file_info, &size) in file_infos.iter().cartesian_product(&sizes) {
+            let file_id = file_info
+                .id
+                .context("file ID for thumbnail generation was not provided")?;
+            // Check if thumbnail already exists
+            match self.repository.get_by_file_and_size(file_id, size).await {
+                Ok(Some(_)) => {
+                    tracing::debug!(
+                        "Thumbnail already exists for file {} size {:?}",
+                        file_id,
+                        size
+                    );
+                }
+                Ok(None) => {
+                    // Need to generate thumbnail
+                    let job = ThumbnailJob {
+                        file_id,
+                        file_path: file_info.path.clone(),
+                        size,
+                        status: ThumbnailJobStatus::Pending,
+                        created_at: Instant::now(),
+                        retry_count: 0,
+                    };
+                    queue.push(job);
+                    queued_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to check existing thumbnail for file {}: {}",
+                        file_id,
+                        e
+                    );
+                    // Queue anyway to be safe
+                    let job = ThumbnailJob {
+                        file_id,
+                        file_path: file_info.path.clone(),
+                        size,
+                        status: ThumbnailJobStatus::Pending,
+                        created_at: Instant::now(),
+                        retry_count: 0,
+                    };
+                    queue.push(job);
+                    queued_count += 1;
                 }
             }
         }
@@ -479,10 +478,7 @@ impl ThumbnailProcessor {
             .repository
             .get_files_without_thumbnails_sizes(all_thumbnail_sizes, None)
             .await?;
-        let files = file_models
-            .into_iter()
-            .map(File::try_from)
-            .collect::<Result<Vec<_>>>()?;
+        let files = file_models.into_iter().map(File::try_from).try_collect()?;
 
         self.queue_files_for_processing(files, ThumbnailSize::all().to_vec())
             .await
