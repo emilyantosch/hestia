@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -114,7 +114,7 @@ impl DirectoryScanner {
 
         tracing::info!("Starting directory sync for: {}", dir_path.display());
 
-        let db_state = self
+        let db_files = self
             .file_operations
             .get_database_state(dir_path)
             .await
@@ -124,7 +124,11 @@ impl DirectoryScanner {
                     .push(format!("failed to get database state: {error}"));
             })?;
 
-        tracing::info!("Found {} files in database", db_state.len());
+        let db_folders = self
+            .file_operations
+            .get_database_folder_state(dir_path)
+            .await?;
+        tracing::info!("Found {} files in database", db_files.len());
 
         let (files, folders) =
             self.scan_filesystem_recursive(dir_path)
@@ -143,11 +147,11 @@ impl DirectoryScanner {
 
         // 3a. Calculate file sync operations
         let mut operations: Vec<SyncOperation> =
-            Self::calculate_file_sync_operations(&db_state, files);
+            Self::calculate_file_sync_operations(&db_files, files);
         tracing::info!("Calculated {} file operations to perform", operations.len());
 
         // 3b. Calculate all sync operations
-        operations.extend(Self::calculate_folder_sync_operations(&db_state, folders));
+        operations.extend(Self::calculate_folder_sync_operations(&db_folders, folders));
         tracing::info!(
             "Calculated {} file and folder operations to perform",
             operations.len()
@@ -207,6 +211,12 @@ impl DirectoryScanner {
             .await;
         report.duration = start_time.elapsed();
 
+        ensure!(
+            report.errors.is_empty(),
+            "Directory sync failed: {}",
+            report.errors.join("; ")
+        );
+
         //NOTE: This could be removed in the future if I do not find any worth in it
         println!("Directory sync completed in {:?}", report.duration);
         println!(
@@ -253,7 +263,11 @@ impl DirectoryScanner {
             .await
             .context("Could not read directory")?;
 
-        while let Ok(Some(entry)) = entries.next_entry().await {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .context("Could not read directory entry")?
+        {
             let path = entry.path();
 
             if path.is_dir() {
@@ -342,7 +356,7 @@ impl DirectoryScanner {
     }
 
     fn calculate_folder_sync_operations(
-        db_state: &HashMap<PathBuf, FileMetadata>,
+        db_state: &HashMap<PathBuf, entity::folders::Model>,
         fs_folders: Vec<Folder>,
     ) -> Vec<SyncOperation> {
         let mut operations = Vec::new();
@@ -353,7 +367,16 @@ impl DirectoryScanner {
             processed_paths.insert(fs_folder.path.clone());
 
             match db_state.get(&fs_folder.path) {
-                Some(_) => operations.push(SyncOperation::UpdateFolder(fs_folder)),
+                Some(existing) => {
+                    if existing.name != fs_folder.name
+                        || u64::try_from(existing.device_id).ok()
+                            != Some(fs_folder.filesystem_object_id.device)
+                        || u64::try_from(existing.inode).ok()
+                            != Some(fs_folder.filesystem_object_id.inode)
+                    {
+                        operations.push(SyncOperation::UpdateFolder(fs_folder));
+                    }
+                }
                 None => {
                     // File doesn't exist in database, insert it
                     operations.push(SyncOperation::InsertFolder(fs_folder));
@@ -364,7 +387,7 @@ impl DirectoryScanner {
         // Check for files in database that no longer exist in filesystem
         for db_path in db_state.keys() {
             if !processed_paths.contains(db_path) {
-                operations.push(SyncOperation::DeleteFile(db_path.to_owned()));
+                operations.push(SyncOperation::DeleteFolder(db_path.to_owned()));
             }
         }
         operations
