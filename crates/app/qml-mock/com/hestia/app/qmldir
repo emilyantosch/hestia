@@ -1,0 +1,5 @@
+module com.hestia.app
+HestiaBackend 1.0 HestiaBackend.qml
+FolderModel 1.0 FolderModel.qml
+FileModel 1.0 FileModel.qml
+TagModel 1.0 TagModel.qml

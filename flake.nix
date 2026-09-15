@@ -7,23 +7,21 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs =
-    {
-      nixpkgs,
-      rust-overlay,
-      flake-utils,
-      ...
-    }:
+  outputs = {
+    nixpkgs,
+    rust-overlay,
+    flake-utils,
+    ...
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        overlays = [ (import rust-overlay) ];
+      system: let
+        overlays = [(import rust-overlay)];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
         qt = pkgs.symlinkJoin {
           name = "hestia-qt";
-          paths = [ pkgs.qt6.qtbase pkgs.qt6.qtdeclarative ];
+          paths = [pkgs.qt6.qtbase pkgs.qt6.qtdeclarative];
         };
         qmake = pkgs.writeShellScript "hestia-qmake" ''
           if [ "$1" = "-query" ]; then
@@ -39,14 +37,12 @@
           fi
           exec ${pkgs.qt6.qtbase}/bin/qmake "$@"
         '';
-      in
-      {
-        devShells.default =
-          with pkgs;
+      in {
+        devShells.default = with pkgs;
           mkShell {
             name = "hestia";
             buildInputs = [
-              (rust-bin.stable.latest.default.override { extensions = [ "rust-src" ]; })
+              (rust-bin.stable.latest.default.override {extensions = ["rust-src"];})
               sea-orm-cli
               sqlite
               sqlite.dev
@@ -54,6 +50,7 @@
               pkg-config
               libiconv
               libglvnd
+              just
               qt
             ];
             nativeBuildInputs = [
