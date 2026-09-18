@@ -1,0 +1,248 @@
+// Theme — the single source of truth for every design token in Hestia's UI.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ONE RULE THAT PREVENTS STYLE DRIFT:
+//   Components read `Theme.*` ONLY. Never write a literal colour, size, radius,
+//   duration or font size inside a component. If you need a value that isn't
+//   here, ADD A TOKEN — don't inline a magic number.
+//     BAD :  color: "crimson"      width: 160      radius: 8
+//     GOOD:  color: Theme.color.danger   width: Theme.size.thumbnailMd   radius: Theme.radius.md
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The VALUES below are the default "Clean Neutral (Light)" theme + Comfortable
+// density. They are also the compile-time fallback. At runtime the Rust
+// `ThemeController` (see docs 02/06) loads the active theme + density from TOML
+// (bundled / user config / home-manager / future community plugins) and drives
+// these properties, emitting on change so the whole UI re-themes live. Because
+// every token is data, a new theme or density is a data file — never a QML edit.
+//
+// Registered as a QML singleton via the sibling `qmldir`. Usage from any file in
+// the module:  import com.hestia.app  →  color: Theme.color.accent
+//
+// Deep reference: Obsidian → hestia/frontend/"02 - Design Tokens & Theming".
+
+pragma Singleton
+import QtQuick
+
+QtObject {
+    id: theme
+
+    // ── Meta ────────────────────────────────────────────────────────────────
+    readonly property string themeName: "Clean Neutral"
+    readonly property string appearance: "light"          // "light" | "dark"
+    readonly property string density: "comfortable"       // "comfortable" | "compact"
+
+    // ── Colour: semantic ROLES, never raw hues ──────────────────────────────
+    // Name by *purpose* (surface, text, accent…), so a component never
+    // cares which literal colour a theme resolves the role to.
+    readonly property QtObject color: QtObject {
+        // Surfaces (back-to-front)
+        readonly property color surface: "#FFFFFF"  // app / page background
+        readonly property color surfaceVariant: "#F4F5F7"  // panels, sidebars, cards
+        readonly property color surfaceSunken: "#ECEEF1"  // wells, insets, list troughs
+        readonly property color surfaceRaised: "#FFFFFF"  // popovers, menus (w/ elevation)
+        readonly property color overlay: "#73101318" // modal scrim (ARGB: alpha first)
+
+        // Content on surfaces (foreground text/icons).
+        // NB: QML reserves the `on<Capital>` identifier space for signal
+        // handlers, so these are `text*` / `*Fg`, never `onSurface`/`onAccent`.
+        readonly property color text: "#1A1D21"  // primary text / icons
+        readonly property color textMuted: "#5C636E"  // secondary text
+        readonly property color textFaint: "#9096A0"  // tertiary, placeholders, disabled
+
+        // Lines
+        readonly property color border: "#E3E6EA"  // hairline dividers / outlines
+        readonly property color borderStrong: "#CDD2D9"  // emphasised borders
+
+        // Accent (primary interactive)
+        readonly property color accent: "#3B82F6"  // fills: buttons, toggles, focus
+        readonly property color accentHover: "#2F72E6"
+        readonly property color accentPressed: "#2661CC"
+        readonly property color accentText: "#2563EB"  // accent as TEXT/links (AA on surface)
+        readonly property color accentMuted: "#E7F0FE"  // tints: selected row / hover fill
+        readonly property color accentFg: "#FFFFFF"  // content on an accent fill
+
+        // Selection & focus
+        readonly property color selection: "#E7F0FE"  // selected item background
+        readonly property color selectionFg: "#14213A"  // content on selection
+        readonly property color focusRing: "#3B82F6"  // keyboard focus outline
+
+        // Status (paired with a `*Fg` for text placed on the fill)
+        readonly property QtObject status: QtObject {
+            readonly property color success: "#10B981"
+            readonly property color successFg: "#FFFFFF"
+            readonly property color warning: "#F59E0B"
+            readonly property color warningFg: "#1A1D21"
+            readonly property color danger: "#EF4444"
+            readonly property color dangerFg: "#FFFFFF"
+            readonly property color info: "#3B82F6"
+            readonly property color infoFg: "#FFFFFF"
+        }
+        // Convenience aliases (danger/success at top level are common enough)
+        readonly property color danger: status.danger
+        readonly property color success: status.success
+        readonly property color warning: status.warning
+    }
+
+    // ── Spacing: 4px base rhythm (density-scaled) ───────────────────────────
+    // Comfortable shown. Compact ≈ 0.75× the md/lg/xl steps (Rust supplies the
+    // active profile at runtime). Use these for ALL margins, paddings, gaps.
+    readonly property QtObject spacing: QtObject {
+        readonly property int none: 0
+        readonly property int xxs: 2
+        readonly property int xs: 4
+        readonly property int sm: 8
+        readonly property int md: 12
+        readonly property int lg: 16
+        readonly property int xl: 24
+        readonly property int xxl: 32
+        readonly property int xxxl: 48
+    }
+
+    // ── Corner radius ───────────────────────────────────────────────────────
+    readonly property QtObject radius: QtObject {
+        readonly property int none: 0
+        readonly property int sm: 4
+        readonly property int md: 6    // default control radius
+        readonly property int lg: 10   // cards, panels
+        readonly property int xl: 16   // large surfaces, dialogs
+        readonly property int pill: 999  // chips, tags, avatars
+    }
+
+    // ── Typography roles ────────────────────────────────────────────────────
+    // family "" = system default (identical resolution handled per-OS by Qt).
+    // Rust may override family for a theme. Each role: size / weight / lineHeight.
+    readonly property QtObject typography: QtObject {
+        readonly property string family: ""            // system UI font
+        readonly property string familyMono: "monospace"   // code, hashes, paths
+
+        readonly property QtObject display: QtObject {
+            readonly property int size: 28
+            readonly property int weight: Font.DemiBold
+            readonly property real lineHeight: 1.2
+        }
+        readonly property QtObject title: QtObject {
+            readonly property int size: 22
+            readonly property int weight: Font.DemiBold
+            readonly property real lineHeight: 1.25
+        }
+        readonly property QtObject heading: QtObject {
+            readonly property int size: 17
+            readonly property int weight: Font.DemiBold
+            readonly property real lineHeight: 1.3
+        }
+        readonly property QtObject subheading: QtObject {
+            readonly property int size: 15
+            readonly property int weight: Font.Medium
+            readonly property real lineHeight: 1.35
+        }
+        readonly property QtObject body: QtObject {
+            readonly property int size: 14
+            readonly property int weight: Font.Normal
+            readonly property real lineHeight: 1.5
+        }
+        readonly property QtObject bodyStrong: QtObject {
+            readonly property int size: 14
+            readonly property int weight: Font.Medium
+            readonly property real lineHeight: 1.5
+        }
+        readonly property QtObject label: QtObject {
+            readonly property int size: 13
+            readonly property int weight: Font.Medium
+            readonly property real lineHeight: 1.4
+        }
+        readonly property QtObject caption: QtObject {
+            readonly property int size: 12
+            readonly property int weight: Font.Normal
+            readonly property real lineHeight: 1.4
+        }
+        readonly property QtObject mono: QtObject {
+            readonly property int size: 13
+            readonly property int weight: Font.Normal
+            readonly property real lineHeight: 1.45
+        }
+    }
+
+    // ── Motion ──────────────────────────────────────────────────────────────
+    // Snappy & functional. Durations in ms; easing values are `Easing.*` enums.
+    // enter = decelerate (OutCubic); exit = accelerate (InCubic); move = standard.
+    readonly property QtObject motion: QtObject {
+        readonly property int instant: 0
+        readonly property int fast: 120   // hovers, small state flips
+        readonly property int base: 180   // most transitions
+        readonly property int slow: 240   // larger surfaces, page changes
+        readonly property int slower: 320   // full-screen / emphasised
+
+        readonly property int standard: Easing.InOutCubic
+        readonly property int enter: Easing.OutCubic
+        readonly property int exit: Easing.InCubic
+        readonly property int emphasized: Easing.OutBack   // use sparingly
+
+        // When true (driven by OS "reduce motion"), components should use
+        // `motion.instant` and skip decorative animation.
+        readonly property bool reduce: false
+    }
+
+    // ── Elevation (shadow recipes) ──────────────────────────────────────────
+    // Qt has no CSS box-shadow; realise these with MultiEffect / a shadow layer.
+    // Each level: vertical offset, blur radius, shadow colour (ARGB).
+    readonly property QtObject elevation: QtObject {
+        readonly property QtObject flat: QtObject {
+            readonly property int y: 0
+            readonly property int blur: 0
+            readonly property color shadow: "#00000000"
+        }
+        readonly property QtObject raised: QtObject {
+            readonly property int y: 1
+            readonly property int blur: 3
+            readonly property color shadow: "#1A101318"
+        }
+        readonly property QtObject overlay: QtObject {
+            readonly property int y: 4
+            readonly property int blur: 12
+            readonly property color shadow: "#24101318"
+        }
+        readonly property QtObject popup: QtObject {
+            readonly property int y: 8
+            readonly property int blur: 24
+            readonly property color shadow: "#33101318"
+        }
+    }
+
+    // ── Sizing (density-scaled control & media dimensions) ──────────────────
+    readonly property QtObject size: QtObject {
+        readonly property int controlSm: 28
+        readonly property int control: 36     // default button / field height
+        readonly property int controlLg: 44     // also the min touch target (mobile-ready)
+
+        readonly property int iconSm: 16
+        readonly property int icon: 20
+        readonly property int iconLg: 24
+
+        readonly property int hitTarget: 32     // min interactive area (desktop)
+        readonly property int touchTarget: 44   // min interactive area (touch)
+
+        readonly property int thumbnailSm: 96   // grid cell edge — small
+        readonly property int thumbnailMd: 144  // grid cell edge — medium (default)
+        readonly property int thumbnailLg: 200  // grid cell edge — large
+
+        readonly property int sidebarWidth: 240
+        readonly property int inspectorWidth: 320
+        readonly property int scrollbarWidth: 10
+    }
+
+    // ── Opacity states ──────────────────────────────────────────────────────
+    readonly property QtObject opacity: QtObject {
+        readonly property real disabled: 0.38
+        readonly property real muted: 0.60
+        readonly property real hover: 0.08   // overlay strength on hover
+        readonly property real pressed: 0.12
+        readonly property real dragged: 0.16
+    }
+
+    // ── Stroke widths ───────────────────────────────────────────────────────
+    readonly property QtObject stroke: QtObject {
+        readonly property int hairline: 1
+        readonly property int focus: 2       // focus-ring thickness
+    }
+}

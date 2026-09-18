@@ -1579,6 +1579,7 @@ dependencies = [
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
+ "qt-build-utils",
  "tokio",
  "tracing",
  "tracing-subscriber",

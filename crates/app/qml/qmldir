@@ -1,0 +1,7 @@
+# Directory-import manifest, used by qmllint and the `qml -I qml-mock` preview.
+# The real build registers these via build.rs (QmlModule "com.hestia.app");
+# without this file the tooling cannot see `pragma Singleton` in Theme.qml and
+# reports every Theme.* token as a missing property.
+singleton Theme 1.0 Theme.qml
+WelcomeView 1.0 WelcomeView.qml
+LibraryView 1.0 LibraryView.qml

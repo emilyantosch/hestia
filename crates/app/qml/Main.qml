@@ -1,261 +1,90 @@
-pragma ComponentBehavior: Bound
-
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Dialogs
 import QtQuick.Layouts
 import com.hestia.app
 
 ApplicationWindow {
     id: window
-    width: 1100
+    width: 1280
     height: 720
     visible: true
     title: qsTr("Hestia")
 
-    property int selectedFolderId: -1
-    property int selectedFileId: -1
+    // The page surface itself — the bottom of the surface stack. Panels
+    // (surfaceVariant) and popovers (surfaceRaised) are drawn on top of it.
+    color: Theme.color.surface
+
+    // Theme hand-off to every Control below. `palette` is inherited down the
+    // item tree, so Buttons, TextFields, ItemDelegates, ScrollBars and ToolTips
+    // pick these up without each one overriding its own `background:`.
+    // Map Hestia's semantic tokens onto Qt's palette roles:
+    palette.window: Theme.color.surface
+    palette.windowText: Theme.color.text
+    // `base` is the fill of editable widgets (TextField): raised, so an input
+    // reads as sitting on top of the surfaceVariant panel, not cut into it.
+    palette.base: Theme.color.surfaceRaised
+    palette.alternateBase: Theme.color.surfaceSunken
+    palette.text: Theme.color.text
+    // Buttons sit on surfaceVariant panels, so they take the sunken fill —
+    // surfaceVariant would make them disappear into the panel behind them.
+    palette.button: Theme.color.surfaceSunken
+    palette.buttonText: Theme.color.text
+    palette.mid: Theme.color.border
+    palette.dark: Theme.color.borderStrong
+    // Built-in selection reuses the same pair the delegates draw by hand.
+    palette.highlight: Theme.color.selection
+    palette.highlightedText: Theme.color.selectionFg
+    palette.accent: Theme.color.accent
+    palette.link: Theme.color.accentText
+    palette.placeholderText: Theme.color.textFaint
+    palette.toolTipBase: Theme.color.surfaceRaised
+    palette.toolTipText: Theme.color.text
 
     HestiaBackend {
         id: backend
         Component.onCompleted: refreshLibraries()
-        onOperationFinished: {
-            if (ready) {
-                folders.refresh()
-                files.refresh(window.selectedFolderId, search.text)
-                tags.refresh()
-            }
-        }
-    }
-    FolderModel { id: folders }
-    FileModel { id: files }
-    TagModel { id: tags }
-
-    FolderDialog {
-        id: folderDialog
-        title: qsTr("Choose the folder whose files Hestia should manage")
-        onAccepted: backend.createLibrary(libraryName.text, selectedFolder)
     }
 
-    ColumnLayout {
+    // The app background: a real item (not just the window clear colour) so it
+    // participates in the scene — grabbable, animatable on theme change, and
+    // the bottom of the surface stack that panels are drawn on top of.
+    Rectangle {
+        id: appBackground
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 10
-
-        Label {
-            Layout.fillWidth: true
-            visible: backend.error.length > 0
-            color: "crimson"
-            text: backend.error
-            wrapMode: Text.Wrap
-        }
-
-        BusyIndicator {
-            Layout.alignment: Qt.AlignHCenter
-            running: backend.busy
-            visible: running
-        }
+        color: Theme.color.surface
 
         ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: !backend.ready
+            anchors.fill: parent
+            anchors.margins: Theme.spacing.lg
+            spacing: Theme.spacing.md
 
             Label {
-                text: qsTr("Choose a Hestia library")
-                font.pixelSize: 28
-                font.bold: true
+                Layout.fillWidth: true
+                visible: backend.error.length > 0
+                color: Theme.color.danger
+                text: backend.error
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.typography.body.size
             }
 
-            ListView {
+            BusyIndicator {
+                Layout.alignment: Qt.AlignHCenter
+                running: backend.busy
+                visible: running
+            }
+
+            WelcomeView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                clip: true
-                model: backend.libraryNames
-                delegate: Button {
-                    required property int index
-                    required property string modelData
-                    width: ListView.view.width
-                    text: modelData
-                    onClicked: backend.openLibrary(index)
-                }
+                visible: !backend.ready
+                backend: backend
             }
 
-            RowLayout {
-                Layout.fillWidth: true
-                TextField {
-                    id: libraryName
-                    Layout.fillWidth: true
-                    placeholderText: qsTr("New library name")
-                    enabled: !backend.busy
-                }
-                Button {
-                    text: qsTr("Choose folder and create")
-                    enabled: libraryName.text.trim().length > 0 && !backend.busy
-                    onClicked: folderDialog.open()
-                }
-            }
-        }
-
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: backend.ready
-
-            RowLayout {
-                Layout.fillWidth: true
-                Label {
-                    Layout.fillWidth: true
-                    text: backend.status
-                }
-                TextField {
-                    id: search
-                    placeholderText: qsTr("Filter files or tags")
-                    onAccepted: files.refresh(window.selectedFolderId, text)
-                }
-                Button {
-                    text: qsTr("Scan")
-                    enabled: !backend.busy
-                    onClicked: backend.scan()
-                }
-            }
-
-            SplitView {
+            LibraryView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-
-                Pane {
-                    SplitView.preferredWidth: 220
-                    ColumnLayout {
-                        anchors.fill: parent
-                        Label { text: qsTr("Folders"); font.bold: true }
-                        Button {
-                            Layout.fillWidth: true
-                            text: qsTr("All files")
-                            onClicked: {
-                                window.selectedFolderId = -1
-                                files.refresh(-1, search.text)
-                            }
-                        }
-                        ListView {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            clip: true
-                            model: folders
-                            delegate: ItemDelegate {
-                                required property int id
-                                required property string name
-                                required property string path
-                                width: ListView.view.width
-                                text: name
-                                ToolTip.text: path
-                                ToolTip.visible: hovered
-                                onClicked: {
-                                    window.selectedFolderId = id
-                                    files.refresh(id, search.text)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Pane {
-                    SplitView.fillWidth: true
-                    GridView {
-                        anchors.fill: parent
-                        clip: true
-                        model: files
-                        cellWidth: 160
-                        cellHeight: 180
-                        delegate: ItemDelegate {
-                            required property int id
-                            required property string name
-                            required property url thumbnailUrl
-                            width: 150
-                            height: 170
-                            onClicked: window.selectedFileId = id
-                            contentItem: Column {
-                                spacing: 6
-                                Image {
-                                    width: 140
-                                    height: 135
-                                    fillMode: Image.PreserveAspectFit
-                                    source: thumbnailUrl
-                                }
-                                Label {
-                                    width: 140
-                                    text: name
-                                    elide: Text.ElideMiddle
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Pane {
-                    SplitView.preferredWidth: 230
-                    ColumnLayout {
-                        anchors.fill: parent
-                        Label { text: qsTr("Tags"); font.bold: true }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: tags.error.length > 0
-                            color: "crimson"
-                            text: tags.error
-                            wrapMode: Text.Wrap
-                        }
-                        ListView {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            clip: true
-                            model: tags
-                            delegate: RowLayout {
-                                required property int id
-                                required property string name
-                                width: ListView.view.width
-                                Label { Layout.fillWidth: true; text: name }
-                                Button {
-                                    text: "+"
-                                    enabled: window.selectedFileId >= 0
-                                    Accessible.name: qsTr("Assign %1").arg(name)
-                                    onClicked: tags.assign(window.selectedFileId, id)
-                                }
-                                Button {
-                                    text: "−"
-                                    enabled: window.selectedFileId >= 0
-                                    Accessible.name: qsTr("Remove %1").arg(name)
-                                    onClicked: tags.unassign(window.selectedFileId, id)
-                                }
-                                Button {
-                                    text: "×"
-                                    Accessible.name: qsTr("Delete %1").arg(name)
-                                    onClicked: tags.remove(id)
-                                }
-                            }
-                        }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            TextField {
-                                id: newTag
-                                Layout.fillWidth: true
-                                placeholderText: qsTr("New tag")
-                                onAccepted: {
-                                    tags.create(text)
-                                    clear()
-                                }
-                            }
-                            Button {
-                                text: qsTr("Add")
-                                enabled: newTag.text.trim().length > 0
-                                onClicked: {
-                                    tags.create(newTag.text)
-                                    newTag.clear()
-                                }
-                            }
-                        }
-                    }
-                }
+                visible: backend.ready
+                backend: backend
             }
         }
     }

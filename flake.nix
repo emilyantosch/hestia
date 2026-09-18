@@ -21,7 +21,7 @@
         };
         qt = pkgs.symlinkJoin {
           name = "hestia-qt";
-          paths = [pkgs.qt6.qtbase pkgs.qt6.qtdeclarative];
+          paths = [pkgs.qt6.qtbase pkgs.qt6.qtdeclarative pkgs.qt6.qtsvg];
         };
         qmake = pkgs.writeShellScript "hestia-qmake" ''
           if [ "$1" = "-query" ]; then
