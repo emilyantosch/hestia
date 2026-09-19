@@ -17,10 +17,7 @@ async-trait = "0.1.89"
 blake3 = "1.8.2"
 cfg-if = "1.0.1"
 chrono = { features = [ "serde" ], version = "0.4" }
-cxx = "1.0.176"
-cxx-qt = "0.9.1"
-cxx-qt-build = { features = [ "link_qt_object_files" ], version = "0.9.1" }
-cxx-qt-lib = { default-features = false, features = [ "qt_full" ], version = "0.9.1" }
+gpui-kit = "0.6.4"
 dirs = "6.0.0"
 image = { default-features = false, features = [ "bmp", "gif", "jpeg", "png", "tiff", "webp" ], version = "0.25" }
 infer = "0.19.0"
@@ -68,7 +65,7 @@ missing_copy_implementations = "warn"
 missing_debug_implementations = "warn"
 redundant_lifetimes = "warn"
 unreachable_pub = "warn"
-unsafe_code = "deny"                   # CXX-Qt bridge modules carry narrow, documented exceptions
+unsafe_code = "deny"
 unstable_features = "forbid"           # if this is blocking you, let's discuss in the team
 unused_import_braces = "warn"
 unused_lifetimes = "warn"

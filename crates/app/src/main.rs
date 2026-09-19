@@ -1,59 +1,61 @@
-#[expect(
-    clippy::unnecessary_box_returns,
-    unsafe_code,
-    unreachable_pub,
-    reason = "CXX-Qt generates boxed public FFI exports and unsafe property accessors"
-)]
-mod cxxqt_object;
+mod demo;
+mod ui;
 
-use controllers::AppController;
-use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
-use std::sync::Arc;
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use anyhow::Result;
+use gpui_kit::assets::AllAssets;
+use gpui_kit::component::{Root, Theme};
+use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, px, size};
+use tracing_subscriber::EnvFilter;
 
-fn init_tracing() {
-    let filter = std::env::var("RUST_LOG").map_or_else(
-        |_| EnvFilter::new("info"),
-        |_| EnvFilter::from_default_env(),
-    );
-    let fmt_layer = fmt::layer()
-        .with_target(false)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true);
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer)
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
         .init();
-}
 
-fn main() {
-    init_tracing();
+    let runtime = tokio::runtime::Runtime::new()?;
+    let library = runtime.block_on(demo::DemoLibrary::load())?;
 
-    let Ok(backend_runtime) = tokio::runtime::Runtime::new() else {
-        tracing::error!("Could not start the backend task runtime.");
-        return;
-    };
-    let Ok(controller) = AppController::new() else {
-        tracing::error!("Could not initialize Hestia's application data directory.");
-        return;
-    };
-    if let Err(error) =
-        cxxqt_object::initialize(Arc::new(controller), backend_runtime.handle().clone())
-    {
-        tracing::error!(error = %error, "Could not initialize the Qt backend");
-        return;
-    }
-
-    let mut app = QGuiApplication::new();
-    let mut engine = QQmlApplicationEngine::new();
-
-    if let Some(engine) = engine.as_mut() {
-        engine.load(&QUrl::from("qrc:/qt/qml/com/hestia/app/qml/Main.qml"));
-    }
-
-    if let Some(app) = app.as_mut() {
-        app.exec();
-    }
+    gpui_kit::application()
+        .with_assets(AllAssets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            Theme::sync_system_appearance(None, cx);
+            ui::configure_theme(cx);
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::centered(size(px(1320.), px(860.)), cx)),
+                window_min_size: Some(size(px(1080.), px(680.))),
+                ..Default::default()
+            };
+            cx.spawn(async move |cx| {
+                let result = cx.open_window(options, |window, cx| {
+                    window.set_window_title("Hestia — GPUI discovery");
+                    let view = cx.new(|cx| ui::FileManager::new(library, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                });
+                match result {
+                    Ok(window) => {
+                        if let Err(error) =
+                            window.update(cx, |_, window, _| window.activate_window())
+                        {
+                            tracing::error!(%error, "Could not activate Hestia");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "Could not open Hestia");
+                        cx.update(|cx| cx.quit());
+                    }
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
+    Ok(())
 }

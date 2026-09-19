@@ -150,7 +150,7 @@ impl FileInfo {
 
     #[must_use]
     pub fn thumbnail_path(&self) -> Option<&Path> {
-        // ponytail: thumbnails are DB blobs; add a QML image provider before exposing URLs.
+        // ponytail: thumbnails are DB blobs; add a frontend image adapter before exposing paths.
         None
     }
 }
@@ -935,7 +935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialized_library_supports_the_qt_controller_api() -> Result<()> {
+    async fn initialized_library_supports_the_frontend_controller_api() -> Result<()> {
         let data_home = TempDir::new()?;
         let content = TempDir::new()?;
         std::fs::write(content.path().join("notes.txt"), "hello")?;

@@ -40,14 +40,26 @@ Hestia is a **cross-platform file management system** that uses intelligent tagg
 
 ## Quickstart
 
-Install Rust 1.85 or newer, a C++ compiler, and Qt 6 with `qmake`, then run:
+This branch explores [GPUI Kit](https://github.com/longbridge/gpui-kit) as a replacement for Qt.
+Install current stable Rust, [just](https://just.systems), and Xcode on macOS, then run:
 
 ```sh
-export QMAKE=/absolute/path/to/Qt/bin/qmake
-cargo run -p hestia
+just run
 ```
 
-With Nix, `nix develop` configures Qt and `QMAKE` before running the same Cargo command.
+On Linux, use `nix develop --command just run` for the native GUI libraries. GPUI needs a graphical session and a GPU driver; Linux support has not been verified on this branch.
+
+The preview creates a **temporary demo library** through the existing Rust backend. It indexes six bundled sample files and assigns tags in SQLite. Search, tag filters, and file selection work locally. The library is removed on normal exit; your existing libraries and files are not opened or changed. The two image samples come from `test_vault` and are embedded in the binary.
+
+This is a UI discovery build, not a replacement for the previous frontend's functionality. Opening real libraries, editing tags, file operations, watching, and thumbnail generation are not wired up. The backend remains unchanged.
+
+GPUI Kit supplies the sidebar, search input, buttons, tag badges, icons, focus behavior, and theme. Use Tab / Shift-Tab to navigate controls and Enter / Space to select a focused file.
+
+```sh
+just test                          # workspace tests, including the backend-backed demo check
+just cargo fmt -p hestia -- --check # check frontend formatting
+just strict-lint                   # workspace Clippy checks
+```
 
 ## FAQs
 

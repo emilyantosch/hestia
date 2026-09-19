@@ -1,1 +1,1 @@
-Run Qt-building Cargo commands inside `nix develop` (for example, `nix develop --command cargo test --workspace`) so `QMAKE` finds the flake’s combined Qt Base/Declarative prefix and QML `.prl` files.
+Use `just` for Rust commands. The frontend uses GPUI Kit, not Qt. On macOS, build with the native Rust toolchain and Xcode. On Linux, use `nix develop --command just <recipe>` for GPUI's system libraries.
