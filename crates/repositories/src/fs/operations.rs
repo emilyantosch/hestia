@@ -17,9 +17,10 @@ use moka::sync::Cache;
 use notify::EventKind;
 use notify::event::{ModifyKind, RenameMode};
 use sea_orm::ActiveValue::Set;
+use sea_orm::sea_query::{BinOper, Expr, IntoColumnRef, SimpleExpr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, IntoActiveModel,
-    QueryFilter, QuerySelect, TransactionTrait,
+    PaginatorTrait, QueryFilter, QuerySelect, TransactionTrait,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -502,11 +503,10 @@ impl FileRepository {
 
     /// Get all files in a directory
     pub async fn get_db_files_in_directory(&self, dir_path: &Path) -> Result<Vec<files::Model>> {
-        let pattern = format!("{}%", Self::database_path(dir_path)?);
         let connection = self.database_manager.get_connection();
 
         Files::find()
-            .filter(files::Column::Path.like(&pattern))
+            .filter(Self::descendant_scope(files::Column::Path, dir_path)?)
             .all(&*connection)
             .await
             .context("Failed to get files from db")
@@ -521,10 +521,10 @@ impl FileRepository {
     ) -> Result<HashMap<PathBuf, FileMetadata>> {
         let files = self.get_db_files_in_directory(dir_path).await?;
 
-        let state = files
+        files
             .into_iter()
-            .filter_map(|file| {
-                let persisted_file = PersistedFile::try_from(file.clone()).ok()?;
+            .map(|file| {
+                let persisted_file = PersistedFile::try_from(file.clone())?;
 
                 let metadata = FileMetadata {
                     id: persisted_file.id,
@@ -533,10 +533,35 @@ impl FileRepository {
                     filesystem_object_id: persisted_file.filesystem_object_id,
                     updated_at: file.updated_at.and_utc(),
                 };
-                Some((persisted_file.path, metadata))
+                Ok((persisted_file.path, metadata))
             })
+            .try_collect()
+    }
+
+    fn descendant_scope(column: impl IntoColumnRef, root: &Path) -> Result<SimpleExpr> {
+        let root = Self::database_path(root)?;
+        let prefix = format!("{}/", root.trim_end_matches('/'));
+        // SQLite GLOB is case-sensitive; escape its metacharacters in literal paths.
+        let escaped = prefix
+            .replace('[', "[[]")
+            .replace('*', "[*]")
+            .replace('?', "[?]");
+        Ok(Expr::col(column).binary(BinOper::Custom("GLOB"), format!("{escaped}*")))
+    }
+
+    pub async fn get_database_folder_state(
+        &self,
+        dir_path: &Path,
+    ) -> Result<HashMap<PathBuf, folders::Model>> {
+        let connection = self.database_manager.get_connection();
+        let folder_state = Folders::find()
+            .filter(Self::descendant_scope(folders::Column::Path, dir_path)?)
+            .all(connection.as_ref())
+            .await?
+            .into_iter()
+            .map(|folder| (PathBuf::from(&folder.path), folder))
             .collect();
-        Ok(state)
+        Ok(folder_state)
     }
 
     pub async fn get_watched_folder_map(&self) -> Result<HashMap<String, WatchedFolderTree>> {
@@ -732,19 +757,27 @@ impl FileRepository {
             return Ok(0);
         }
 
-        let path_strings: Vec<_> = paths
-            .iter()
-            .map(|path| Self::database_path(path))
-            .try_collect()?;
-
+        let mut scope = Condition::any();
+        for path in paths {
+            scope = scope
+                .add(folders::Column::Path.eq(Self::database_path(&path)?))
+                .add(Self::descendant_scope(folders::Column::Path, &path)?);
+        }
         let connection = self.database_manager.get_connection();
-        let result = Folders::delete_many()
-            .filter(folders::Column::Path.is_in(path_strings))
-            .exec(&*connection)
+        let transaction = connection.begin().await?;
+        // Count before deletion: SQLite's rows_affected excludes cascaded descendants.
+        let count = Folders::find()
+            .filter(scope.clone())
+            .count(&transaction)
             .await?;
+        Folders::delete_many()
+            .filter(scope)
+            .exec(&transaction)
+            .await?;
+        transaction.commit().await?;
 
         self.database_manager.invalidate_thumbnail_cache();
-        Ok(result.rows_affected as usize)
+        Ok(usize::try_from(count)?)
     }
 
     /// Clear file type cache (useful for testing or cache invalidation)
