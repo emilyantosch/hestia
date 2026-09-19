@@ -154,16 +154,12 @@ impl ThumbnailWorker {
     async fn get_next_job(&self) -> Option<ThumbnailJob> {
         let mut queue = self.job_queue.lock().await;
 
-        // Find first pending job
-        for (index, job) in queue.iter().enumerate() {
-            if job.status == ThumbnailJobStatus::Pending {
-                let mut job = queue.remove(index);
-                job.status = ThumbnailJobStatus::Processing;
-                return Some(job);
-            }
-        }
-
-        None
+        let index = queue
+            .iter()
+            .position(|job| job.status == ThumbnailJobStatus::Pending)?;
+        let mut job = queue.remove(index);
+        job.status = ThumbnailJobStatus::Processing;
+        Some(job)
     }
 
     async fn process_job(&self, job: ThumbnailJob) -> Result<()> {
@@ -374,7 +370,7 @@ impl ThumbnailProcessor {
                     file_path,
                     size,
                 } => {
-                    self.queue_single_file(file_id, file_path, size).await?;
+                    self.queue_single_file(file_id, file_path, size).await;
                 }
                 ThumbnailMessage::QueueMissingFiles => {
                     self.queue_missing_files().await?;
@@ -418,54 +414,16 @@ impl ThumbnailProcessor {
         file_infos: Vec<File>,
         sizes: Vec<ThumbnailSize>,
     ) -> Result<usize> {
-        let mut queue = self.job_queue.lock().await;
         let mut queued_count = 0;
 
         for (file_info, &size) in file_infos.iter().cartesian_product(&sizes) {
             let file_id = file_info
                 .id
                 .context("file ID for thumbnail generation was not provided")?;
-            // Check if thumbnail already exists
-            match self.repository.get_by_file_and_size(file_id, size).await {
-                Ok(Some(_)) => {
-                    tracing::debug!(
-                        "Thumbnail already exists for file {} size {:?}",
-                        file_id,
-                        size
-                    );
-                }
-                Ok(None) => {
-                    // Need to generate thumbnail
-                    let job = ThumbnailJob {
-                        file_id,
-                        file_path: file_info.path.clone(),
-                        size,
-                        status: ThumbnailJobStatus::Pending,
-                        created_at: Instant::now(),
-                        retry_count: 0,
-                    };
-                    queue.push(job);
-                    queued_count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to check existing thumbnail for file {}: {}",
-                        file_id,
-                        e
-                    );
-                    // Queue anyway to be safe
-                    let job = ThumbnailJob {
-                        file_id,
-                        file_path: file_info.path.clone(),
-                        size,
-                        status: ThumbnailJobStatus::Pending,
-                        created_at: Instant::now(),
-                        retry_count: 0,
-                    };
-                    queue.push(job);
-                    queued_count += 1;
-                }
-            }
+            queued_count += usize::from(
+                self.queue_single_file(file_id, file_info.path.clone(), size)
+                    .await,
+            );
         }
 
         tracing::info!("Queued {} thumbnail generation jobs", queued_count);
@@ -489,8 +447,7 @@ impl ThumbnailProcessor {
         file_id: i32,
         file_path: PathBuf,
         size: ThumbnailSize,
-    ) -> Result<()> {
-        // Check if thumbnail already exists
+    ) -> bool {
         match self.repository.get_by_file_and_size(file_id, size).await {
             Ok(Some(_)) => {
                 tracing::debug!(
@@ -498,49 +455,29 @@ impl ThumbnailProcessor {
                     file_id,
                     size
                 );
-                return Ok(());
+                return false;
             }
-            Ok(None) => {
-                // Need to generate thumbnail
-                let job = ThumbnailJob {
-                    file_id,
-                    file_path,
-                    size,
-                    status: ThumbnailJobStatus::Pending,
-                    created_at: Instant::now(),
-                    retry_count: 0,
-                };
-
-                let mut queue = self.job_queue.lock().await;
-                queue.push(job);
-                tracing::info!(
-                    "Queued single thumbnail job for file {} size {:?}",
-                    file_id,
-                    size
-                );
-            }
-            Err(e) => {
+            Ok(None) => (),
+            Err(error) => {
+                // Preserve the retry policy: queue even if the lookup failed.
                 tracing::warn!(
                     "Failed to check existing thumbnail for file {}: {}",
                     file_id,
-                    e
+                    error
                 );
-                // Queue anyway to be safe
-                let job = ThumbnailJob {
-                    file_id,
-                    file_path,
-                    size,
-                    status: ThumbnailJobStatus::Pending,
-                    created_at: Instant::now(),
-                    retry_count: 0,
-                };
-
-                let mut queue = self.job_queue.lock().await;
-                queue.push(job);
             }
         }
 
-        Ok(())
+        self.job_queue.lock().await.push(ThumbnailJob {
+            file_id,
+            file_path,
+            size,
+            status: ThumbnailJobStatus::Pending,
+            created_at: Instant::now(),
+            retry_count: 0,
+        });
+        tracing::info!("Queued thumbnail job for file {} size {:?}", file_id, size);
+        true
     }
 
     fn spawn_stats_updater(&self) -> tokio::task::JoinHandle<()> {
@@ -663,6 +600,114 @@ impl ThumbnailProcessorHandler {
 
     pub fn shutdown(&self) -> Result<()> {
         self.sender.send(ThumbnailMessage::Shutdown)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use migration::{Migrator, MigratorTrait};
+    use model::services::thumbnail::Thumbnail;
+    use repositories::{
+        config::DatabaseSettings, fs::operations::FileRepository, manager::DatabaseManager,
+    };
+    use sea_orm::ConnectionTrait;
+
+    #[tokio::test]
+    async fn single_and_batch_queueing_share_lookup_and_job_rules() -> Result<()> {
+        let database = Arc::new(
+            DatabaseManager::new(DatabaseSettings {
+                con_string: "sqlite::memory:".to_string(),
+                timeout: 30_000,
+                ..DatabaseSettings::default()
+            })
+            .await?,
+        );
+        Migrator::up(database.get_connection().as_ref(), None).await?;
+        let files = FileRepository::new(Arc::clone(&database));
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("image.txt");
+        tokio::fs::write(&path, b"image").await?;
+        let mut file = File::create_file_info_from_path(&path).await?;
+        files.batch_upsert_files(vec![file.clone()]).await?;
+        let file_id = files
+            .get_file_by_path(&path)
+            .await?
+            .context("missing file")?
+            .id;
+        file.id = Some(file_id);
+        let repository = Arc::new(ThumbnailOperations::new(Arc::clone(&database)));
+        repository
+            .create_thumbnail(
+                file_id,
+                Thumbnail::with_image_data(ThumbnailSize::Small, vec![1]),
+            )
+            .await?;
+        let (_handler, receiver) = ThumbnailProcessorHandler::new();
+        let mut processor =
+            ThumbnailProcessor::new(receiver, repository, Arc::new(ThumbnailGenerator::new()));
+
+        assert!(
+            !processor
+                .queue_single_file(file_id, path.clone(), ThumbnailSize::Small)
+                .await
+        );
+        assert_eq!(
+            processor
+                .queue_files_for_processing(vec![file.clone()], ThumbnailSize::all().to_vec())
+                .await?,
+            2
+        );
+        let worker = ThumbnailWorker::new(
+            0,
+            Arc::clone(&processor.job_queue),
+            Arc::clone(&processor.repository),
+            Arc::clone(&processor.generator),
+            Arc::clone(&processor.stats),
+            processor.config,
+        );
+        for size in [ThumbnailSize::Medium, ThumbnailSize::Large] {
+            let job = worker.get_next_job().await.context("missing queued job")?;
+            assert_eq!(
+                (job.file_id, job.file_path, job.size),
+                (file_id, path.clone(), size)
+            );
+            assert_eq!(job.status, ThumbnailJobStatus::Processing);
+            assert_eq!(job.retry_count, 0);
+        }
+        assert!(worker.get_next_job().await.is_none());
+        file.id = None;
+        assert!(
+            processor
+                .queue_files_for_processing(vec![file.clone()], vec![ThumbnailSize::Small])
+                .await
+                .is_err()
+        );
+        assert_eq!(processor.get_pending_job_count().await, 0);
+
+        // Both entry points still queue work when the database lookup fails.
+        processor
+            .repository
+            .delete_thumbnails_for_file(file_id)
+            .await?;
+        database
+            .get_connection()
+            .execute_unprepared("DROP TABLE thumbnails")
+            .await?;
+        file.id = Some(file_id);
+        assert!(
+            processor
+                .queue_single_file(file_id, path, ThumbnailSize::Small)
+                .await
+        );
+        assert_eq!(
+            processor
+                .queue_files_for_processing(vec![file], vec![ThumbnailSize::Small])
+                .await?,
+            1
+        );
+        assert_eq!(processor.get_pending_job_count().await, 2);
         Ok(())
     }
 }

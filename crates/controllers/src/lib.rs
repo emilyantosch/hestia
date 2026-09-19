@@ -365,12 +365,12 @@ impl AppController {
     }
 
     pub fn list_libraries(&self) -> ControllerResult<Vec<LibraryInfo>> {
-        let mut libraries = Library::list_libraries_in(&self.data_home)
+        let mut libraries: Vec<_> = Library::list_libraries_in(&self.data_home)
             .map_err(|error| ControllerError::operation(ControllerOperation::ListLibraries, error))?
             .into_iter()
-            .map(PathBuf::from)
+            .map_into()
             .map(LibraryInfo::from_path)
-            .collect::<ControllerResult<Vec<_>>>()?;
+            .try_collect()?;
         libraries.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
         Ok(libraries)
     }
@@ -565,7 +565,7 @@ impl AppController {
             .order_by_asc(folders::Column::Name)
             .all(database_manager.get_connection().as_ref())
             .await
-            .map(|items| items.into_iter().map_into().collect())
+            .map(|items| items.into_iter().map_into().collect_vec())
             .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
     }
 
@@ -601,7 +601,7 @@ impl AppController {
             .order_by_asc(files::Column::Name)
             .all(connection.as_ref())
             .await
-            .map(|items| items.into_iter().map_into().collect())
+            .map(|items| items.into_iter().map_into().collect_vec())
             .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
     }
 
@@ -611,7 +611,7 @@ impl AppController {
             .order_by_asc(tags::Column::Name)
             .all(database_manager.get_connection().as_ref())
             .await
-            .map(|items| items.into_iter().map_into().collect())
+            .map(|items| items.into_iter().map_into().collect_vec())
             .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
     }
 
@@ -773,7 +773,7 @@ impl Workspace {
             .flat_map(|config| &config.library_paths)
             .filter_map(|root| root.path.clone())
             .map(CanonPath::try_from)
-            .collect::<Result<Vec<_>>>()?;
+            .try_collect()?;
         let database_path = library.get_canon_database_path()?;
         let connection_string = format!(
             "sqlite:///{}",

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -322,36 +323,31 @@ impl DirectoryScanner {
         db_state: &HashMap<PathBuf, FileMetadata>,
         fs_files: Vec<File>,
     ) -> Vec<SyncOperation> {
-        let mut operations = Vec::new();
         let mut processed_paths = std::collections::HashSet::new();
-
-        // Check filesystem files against database
-        for fs_file in fs_files {
-            processed_paths.insert(fs_file.path.clone());
-
-            match db_state.get(&fs_file.path) {
-                Some(db_metadata) => {
-                    // File exists in database, check if it needs updating
-                    if db_metadata.content_digest != fs_file.content_digest
-                        || db_metadata.filesystem_object_id != fs_file.filesystem_object_id
-                    {
-                        operations.push(SyncOperation::UpdateFile(fs_file));
-                    }
-                    // If hashes match, no operation needed
+        let mut operations = fs_files
+            .into_iter()
+            .inspect(|file| {
+                processed_paths.insert(file.path.clone());
+            })
+            .filter_map(|file| match db_state.get(&file.path) {
+                Some(existing)
+                    if existing.content_digest != file.content_digest
+                        || existing.filesystem_object_id != file.filesystem_object_id =>
+                {
+                    Some(SyncOperation::UpdateFile(file))
                 }
-                None => {
-                    // File doesn't exist in database, insert it
-                    operations.push(SyncOperation::InsertFile(fs_file));
-                }
-            }
-        }
+                Some(_) => None,
+                None => Some(SyncOperation::InsertFile(file)),
+            })
+            .collect_vec();
 
-        // Check for files in database that no longer exist in filesystem
-        for db_path in db_state.keys() {
-            if !processed_paths.contains(db_path) {
-                operations.push(SyncOperation::DeleteFile(db_path.to_owned()));
-            }
-        }
+        operations.extend(
+            db_state
+                .keys()
+                .filter(|path| !processed_paths.contains(*path))
+                .cloned()
+                .map(SyncOperation::DeleteFile),
+        );
         operations
     }
 
@@ -359,50 +355,54 @@ impl DirectoryScanner {
         db_state: &HashMap<PathBuf, entity::folders::Model>,
         fs_folders: Vec<Folder>,
     ) -> Vec<SyncOperation> {
-        let mut operations = Vec::new();
         let mut processed_paths = std::collections::HashSet::new();
-
-        // Check filesystem files against database
-        for fs_folder in fs_folders {
-            processed_paths.insert(fs_folder.path.clone());
-
-            match db_state.get(&fs_folder.path) {
-                Some(existing) => {
-                    if existing.name != fs_folder.name
+        let mut operations = fs_folders
+            .into_iter()
+            .inspect(|folder| {
+                processed_paths.insert(folder.path.clone());
+            })
+            .filter_map(|folder| match db_state.get(&folder.path) {
+                Some(existing)
+                    if existing.name != folder.name
                         || u64::try_from(existing.device_id).ok()
-                            != Some(fs_folder.filesystem_object_id.device)
+                            != Some(folder.filesystem_object_id.device)
                         || u64::try_from(existing.inode).ok()
-                            != Some(fs_folder.filesystem_object_id.inode)
-                    {
-                        operations.push(SyncOperation::UpdateFolder(fs_folder));
-                    }
+                            != Some(folder.filesystem_object_id.inode) =>
+                {
+                    Some(SyncOperation::UpdateFolder(folder))
                 }
-                None => {
-                    // File doesn't exist in database, insert it
-                    operations.push(SyncOperation::InsertFolder(fs_folder));
-                }
-            }
-        }
+                Some(_) => None,
+                None => Some(SyncOperation::InsertFolder(folder)),
+            })
+            .collect_vec();
 
-        // Check for files in database that no longer exist in filesystem
-        for db_path in db_state.keys() {
-            if !processed_paths.contains(db_path) {
-                operations.push(SyncOperation::DeleteFolder(db_path.to_owned()));
-            }
-        }
+        operations.extend(
+            db_state
+                .keys()
+                .filter(|path| !processed_paths.contains(*path))
+                .cloned()
+                .map(SyncOperation::DeleteFolder),
+        );
         operations
     }
 
     /// Execute a batch of insert/update operations
     async fn execute_upsert_file_batch(&self, batch: &mut Vec<File>, report: &mut SyncReport) {
-        match self.file_operations.batch_upsert_files(batch.clone()).await {
+        if batch.is_empty() {
+            return;
+        }
+
+        match self
+            .file_operations
+            .batch_upsert_files(std::mem::take(batch))
+            .await
+        {
             Ok(result) => {
                 report.files_inserted += result.file_inserted;
                 report.files_updated += result.file_updated;
             }
             Err(error) => report.errors.push(error.to_string()),
         }
-        batch.clear();
     }
 
     async fn execute_upsert_folder_batch(&self, batch: &mut Vec<Folder>, report: &mut SyncReport) {
@@ -412,7 +412,7 @@ impl DirectoryScanner {
 
         match self
             .file_operations
-            .batch_upsert_folders(batch.clone())
+            .batch_upsert_folders(std::mem::take(batch))
             .await
         {
             Ok(result) => {
@@ -421,8 +421,6 @@ impl DirectoryScanner {
             }
             Err(error) => report.errors.push(error.to_string()),
         }
-
-        batch.clear();
     }
 
     /// Execute a batch of delete operations
@@ -431,11 +429,14 @@ impl DirectoryScanner {
             return;
         }
 
-        match self.file_operations.batch_delete_files(batch.clone()).await {
+        match self
+            .file_operations
+            .batch_delete_files(std::mem::take(batch))
+            .await
+        {
             Ok(count) => report.files_deleted += count,
             Err(error) => report.errors.push(error.to_string()),
         }
-        batch.clear();
     }
 
     /// Execute a batch of delete operations
@@ -446,13 +447,12 @@ impl DirectoryScanner {
 
         match self
             .file_operations
-            .batch_delete_folders(batch.clone())
+            .batch_delete_folders(std::mem::take(batch))
             .await
         {
             Ok(count) => report.folders_deleted += count,
             Err(error) => report.errors.push(error.to_string()),
         }
-        batch.clear();
     }
 }
 

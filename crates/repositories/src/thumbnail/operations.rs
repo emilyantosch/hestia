@@ -1,4 +1,5 @@
 use entity::files;
+use itertools::{Either, Itertools};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -47,15 +48,12 @@ impl ThumbnailOperations {
             .thumbnail_cache_generation
             .load(Ordering::SeqCst);
         let cache = &self.database_manager.thumbnail_cache;
-        let mut result = Vec::new();
-        let mut missing = Vec::new();
-        for file_id in file_ids {
-            if let Some(models) = cache.get(&(generation, file_id)) {
-                result.push(models);
-            } else {
-                missing.push(file_id);
-            }
-        }
+        let (mut result, missing): (Vec<_>, Vec<_>) =
+            file_ids.into_iter().partition_map(|file_id| {
+                cache
+                    .get(&(generation, file_id))
+                    .map_or(Either::Right(file_id), Either::Left)
+            });
         if !missing.is_empty() {
             let db = self.database_manager.get_connection();
             let models = Thumbnails::find()
@@ -63,10 +61,7 @@ impl ThumbnailOperations {
                 .all(db.as_ref())
                 .await
                 .context("Failed to query thumbnails")?;
-            let mut by_file: HashMap<i32, Vec<thumbnails::Model>> = HashMap::new();
-            for model in models {
-                by_file.entry(model.file_id).or_default().push(model);
-            }
+            let by_file = models.into_iter().into_group_map_by(|model| model.file_id);
             for (file_id, models) in by_file {
                 let models = Arc::new(models);
                 cache.insert((generation, file_id), Arc::clone(&models));
@@ -122,7 +117,7 @@ impl ThumbnailOperations {
             .flat_map(|models| models.iter())
             .cloned()
             .map(Thumbnail::from_model)
-            .collect()
+            .try_collect()
     }
 
     /// Get thumbnail for a specific file and size
@@ -149,7 +144,7 @@ impl ThumbnailOperations {
             .filter(|model| model.size == size.as_str())
             .cloned()
             .map(Thumbnail::from_model)
-            .collect()
+            .try_collect()
     }
 
     /// Delete all thumbnails for a specific file
@@ -272,7 +267,7 @@ impl ThumbnailOperations {
     ) -> Result<Vec<files::Model>> {
         let db = self.database_manager.get_connection();
 
-        let sizes: Vec<String> = sizes.into_iter().map(|v| v.to_string()).collect();
+        let sizes = sizes.into_iter().map_into::<String>().collect_vec();
         // Build the query to find files without thumbnails of the specified size
         let mut query = files::Entity::find().filter(
             files::Column::Id.not_in_subquery(

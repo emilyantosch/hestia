@@ -64,7 +64,14 @@ async fn root_snapshots_preserve_files_and_scope_deletions() -> Result<()> {
     );
     assert_eq!(repository.get_database_state(root.as_ref()).await?.len(), 1);
 
-    tokio::fs::write(root.as_ref().join("nested/deep/image.txt"), b"changed").await?;
+    // Replacing an entry with identical bytes still changes its filesystem identity.
+    let image = root.as_ref().join("nested/deep/image.txt");
+    tokio::fs::rename(&image, directory.path().join("original.txt")).await?;
+    tokio::fs::write(&image, b"original").await?;
+    let replaced = scanner.sync_directory(&root).await?;
+    assert_eq!((replaced.files_inserted, replaced.files_updated), (0, 1));
+
+    tokio::fs::write(&image, b"changed").await?;
     let changed = scanner.sync_directory(&root).await?;
     assert_eq!((changed.files_inserted, changed.files_updated), (0, 1));
     tokio::fs::remove_dir_all(root.as_ref().join("nested")).await?;
