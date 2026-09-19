@@ -187,7 +187,7 @@ impl FileRepository {
         C: ConnectionTrait,
     {
         let root_folders = self.find_root_folders(Some(transaction)).await?;
-        let root_folder_ids = root_folders.into_iter().map(|v| v.id).collect();
+        let root_folder_ids = root_folders.into_iter().map(|v| v.id).collect_vec();
         Ok(root_folder_ids)
     }
 
@@ -212,8 +212,9 @@ impl FileRepository {
 
         let root_folder_paths = root_folders
             .into_iter()
-            .map(|v| PathBuf::from(v.path))
-            .collect();
+            .map(|v| v.path)
+            .map_into()
+            .collect_vec();
         Ok(root_folder_paths)
     }
 
@@ -577,7 +578,7 @@ impl FileRepository {
         let root_children = without_parent
             .into_iter()
             .map(|model| model.id.to_string())
-            .collect();
+            .collect_vec();
         let root = WatchedFolderTree::with(
             "".to_string(),
             "".to_string(),
@@ -598,7 +599,7 @@ impl FileRepository {
             let children_array: Option<Vec<String>> = if children.is_empty() {
                 None
             } else {
-                Some(children.into_iter().map(|v| v.id.to_string()).collect())
+                Some(children.into_iter().map(|v| v.id.to_string()).collect_vec())
             };
             let wf = WatchedFolderTree::with(folder.name, folder.path, children_array, None, None);
             map.insert(folder.id.to_string(), wf);
