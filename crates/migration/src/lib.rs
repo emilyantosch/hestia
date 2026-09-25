@@ -10,6 +10,7 @@ mod m20250831_100006_create_file_has_tags;
 mod m20250831_100007_create_tag_has_tags;
 mod m20250831_181914_icon_color;
 mod m20250904_133644_create_thumbnails;
+mod m20260901_100001_tag_color;
 
 pub struct Migrator;
 
@@ -30,6 +31,7 @@ impl MigratorTrait for Migrator {
             // Additional feature tables
             Box::new(m20250831_181914_icon_color::Migration),
             Box::new(m20250904_133644_create_thumbnails::Migration),
+            Box::new(m20260901_100001_tag_color::Migration),
         ]
     }
 }

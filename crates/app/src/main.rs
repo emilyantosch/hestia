@@ -1,4 +1,6 @@
 mod demo;
+mod platform;
+mod preview;
 mod ui;
 
 use anyhow::Result;
@@ -8,6 +10,15 @@ use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    // Child WebViews need GPUI's non-DirectComposition renderer on Windows.
+    #[cfg(target_os = "windows")]
+    #[expect(
+        unsafe_code,
+        reason = "Set renderer configuration before starting any threads"
+    )]
+    unsafe {
+        std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -21,6 +32,7 @@ fn main() -> Result<()> {
         .with_assets(AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            platform::init(cx);
             Theme::sync_system_appearance(None, cx);
             ui::configure_theme(cx);
             cx.on_window_closed(|cx, _| {

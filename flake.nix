@@ -30,6 +30,7 @@
           vulkan-loader
           fontconfig
           freetype
+          xdg-utils
         ];
       in
       {

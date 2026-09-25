@@ -49,11 +49,20 @@ just run
 
 On Linux, use `nix develop --command just run` for the native GUI libraries. GPUI needs a graphical session and a GPU driver; Linux support has not been verified on this branch.
 
-The preview creates a **temporary demo library** through the existing Rust backend. It indexes six bundled sample files and assigns tags in SQLite. Search, tag filters, and file selection work locally. The library is removed on normal exit; your existing libraries and files are not opened or changed. The two image samples come from `test_vault` and are embedded in the binary.
+The preview creates a **temporary demo library** through the existing Rust backend. It indexes seven bundled sample files and assigns tags in SQLite. Search, tag filters, and file selection work locally. The library is removed on normal exit; your existing libraries and files are not opened or changed. The image samples and a generated three-second test video come from `test_vault` and are embedded in the binary.
 
-This is a UI discovery build, not a replacement for the previous frontend's functionality. Opening real libraries, editing tags, file operations, watching, and thumbnail generation are not wired up. The backend remains unchanged.
+This is a UI discovery build, not a replacement for the previous frontend's functionality. Opening real libraries, deleting tags from the library, file operations, watching, and thumbnail generation are not wired up.
 
 GPUI Kit supplies the sidebar, search input, buttons, tag badges, icons, focus behavior, and theme. Use Tab / Shift-Tab to navigate controls and Enter / Space to select a focused file.
+
+- Click the centered search bar or press **Cmd+P** to search filenames and tags as you type. Use ↑ / ↓ and Enter to select a result; Escape closes the popup. Search respects the selected sidebar tag. Use the toolbar’s × button to clear the filter.
+- Select a file and press **Space** to preview rendered Markdown, UTF-8 text, or images inside Hestia. **Escape** or the dialog’s close button dismisses the preview. Text previews are limited to 1 MiB.
+- On Linux, videos open in your default player through `xdg-open`. Install a video player and set it as the default for video files. Hestia does not require GTK3 or WebKitGTK on Linux. Closing the preview does not stop external playback; demo files are removed when Hestia exits. Bundled libmpv or a similar backend is deferred until embedded Linux playback is needed.
+- On macOS and Windows, videos play inside Hestia with playback, seeking, and volume controls; closing the preview stops playback. Codecs depend on the system WebView. Playback and seeking were checked on macOS; Windows/Linux playback is not yet verified. WebView clients without byte-range support are limited to 64 MiB.
+- Select a file and use **File details → Tags** to add tags. Click an existing tag suggestion, or type a name and press Enter or **Add**. New names create tags; existing names reuse them. Changes update search and filters and are saved in the temporary library for this session only.
+- Click **×** on a tag in File details to remove it from that file only. Click **Edit** beside a sidebar tag to rename it in the details panel, then press Enter or **Save**. Renaming updates all files that use the tag; **Cancel rename** leaves it unchanged. Empty or already-used names are rejected.
+- Open **Settings** with **Cmd+,** or the native macOS menu. Choose System, Light, or Dark. This preview keeps the choice for the current session only. On other platforms, use Ctrl instead of Cmd.
+- On macOS, the Dock icon follows the app theme. The two bundled logo files in `crates/app/icons/hestia-{light,dark}.png` come unchanged from `../rheia/hestia_v2/public/20250925_logo_{light,dark}_rotated_rev01.png`. No logo appears inside the window.
 
 ```sh
 just test                          # workspace tests, including the backend-backed demo check

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use entity::{file_has_tags, files, folders, tags};
+use entity::{file_has_tags, files, folders, tag_has_tags, tags};
 use itertools::Itertools;
 use library::library::{Library, LibraryConfig, LibraryPathConfig};
 use migration::{Migrator, MigratorTrait};
@@ -170,6 +170,8 @@ impl From<files::Model> for FileInfo {
 pub struct TagInfo {
     id: i32,
     name: String,
+    color: Option<u32>,
+    sub_tag_ids: Vec<i32>,
 }
 
 impl TagInfo {
@@ -184,11 +186,25 @@ impl TagInfo {
     }
 }
 
+impl TagInfo {
+    #[must_use]
+    pub fn color(&self) -> Option<u32> {
+        self.color
+    }
+
+    #[must_use]
+    pub fn sub_tag_ids(&self) -> &[i32] {
+        &self.sub_tag_ids
+    }
+}
+
 impl From<tags::Model> for TagInfo {
     fn from(tag: tags::Model) -> Self {
         Self {
             id: tag.id,
             name: tag.name,
+            color: tag.color.map(|color| color as u32),
+            sub_tag_ids: Vec::new(),
         }
     }
 }
@@ -253,6 +269,9 @@ pub enum ControllerError {
     MissingStorageFolder,
     NoContentFolders,
     InvalidTagName,
+    InvalidTagColor,
+    InvalidTagHierarchy,
+    TagAlreadyExists,
     FileNotFound,
     TagNotFound,
     OperationFailed {
@@ -294,6 +313,11 @@ impl Display for ControllerError {
             Self::MissingStorageFolder => formatter.write_str("The library has no storage folder."),
             Self::NoContentFolders => formatter.write_str("The library has no content folders."),
             Self::InvalidTagName => formatter.write_str("Tag names cannot be empty."),
+            Self::InvalidTagColor => formatter.write_str("Tag colors must be 24-bit RGB values."),
+            Self::InvalidTagHierarchy => {
+                formatter.write_str("A tag cannot contain itself, directly or through other tags.")
+            }
+            Self::TagAlreadyExists => formatter.write_str("A tag with that name already exists."),
             Self::FileNotFound => formatter.write_str("The selected file no longer exists."),
             Self::TagNotFound => formatter.write_str("The selected tag no longer exists."),
             Self::OperationFailed { operation, source } => {
@@ -607,12 +631,27 @@ impl AppController {
 
     pub async fn list_tags(&self) -> ControllerResult<Vec<TagInfo>> {
         let database_manager = self.database_manager().await?;
-        tags::Entity::find()
+        let connection = database_manager.get_connection();
+        let mut tags: Vec<TagInfo> = tags::Entity::find()
             .order_by_asc(tags::Column::Name)
-            .all(database_manager.get_connection().as_ref())
+            .all(connection.as_ref())
             .await
-            .map(|items| items.into_iter().map_into().collect())
-            .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
+            .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))?
+            .into_iter()
+            .map_into()
+            .collect();
+        let links = tag_has_tags::Entity::find()
+            .all(connection.as_ref())
+            .await
+            .map_err(|error| {
+                ControllerError::operation(ControllerOperation::QueryLibrary, error)
+            })?;
+        for link in links {
+            if let Some(tag) = tags.iter_mut().find(|tag| tag.id == link.super_tag_id) {
+                tag.sub_tag_ids.push(link.sub_tag_id);
+            }
+        }
+        Ok(tags)
     }
 
     pub async fn create_tag(&self, name: &str) -> ControllerResult<()> {
@@ -631,6 +670,7 @@ impl AppController {
         tags::ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
             name: Set(name.to_string()),
+            color: Set(None),
             created_at: Set(chrono::Utc::now().naive_utc()),
             updated_at: Set(chrono::Utc::now().naive_utc()),
         }
@@ -640,21 +680,94 @@ impl AppController {
         .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))
     }
 
-    pub async fn update_tag(&self, tag_id: i32, name: &str) -> ControllerResult<()> {
+    pub async fn update_tag(
+        &self,
+        tag_id: i32,
+        name: &str,
+        color: Option<u32>,
+        sub_tag_ids: &[i32],
+    ) -> ControllerResult<()> {
         let name = Self::tag_name(name)?;
+        if color.is_some_and(|color| color > 0x00ff_ffff) {
+            return Err(ControllerError::InvalidTagColor);
+        }
         let database_manager = self.database_manager().await?;
         let connection = database_manager.get_connection();
+        let transaction = connection
+            .begin()
+            .await
+            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
         let tag = tags::Entity::find_by_id(tag_id)
-            .one(connection.as_ref())
+            .one(&transaction)
             .await
             .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?
             .ok_or(ControllerError::TagNotFound)?;
+        if tags::Entity::find()
+            .filter(tags::Column::Name.eq(name))
+            .filter(tags::Column::Id.ne(tag_id))
+            .one(&transaction)
+            .await
+            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?
+            .is_some()
+        {
+            return Err(ControllerError::TagAlreadyExists);
+        }
+        let links = tag_has_tags::Entity::find()
+            .all(&transaction)
+            .await
+            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+        let mut pending = sub_tag_ids.to_vec();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(id) = pending.pop() {
+            if id == tag_id {
+                return Err(ControllerError::InvalidTagHierarchy);
+            }
+            if visited.insert(id) {
+                pending.extend(
+                    links
+                        .iter()
+                        .filter(|link| link.super_tag_id == id)
+                        .map(|link| link.sub_tag_id),
+                );
+            }
+        }
+        for id in sub_tag_ids.iter().copied().unique() {
+            if tags::Entity::find_by_id(id)
+                .one(&transaction)
+                .await
+                .map_err(|error| {
+                    ControllerError::operation(ControllerOperation::ManageTags, error)
+                })?
+                .is_none()
+            {
+                return Err(ControllerError::TagNotFound);
+            }
+        }
         let mut tag = tag.into_active_model();
         tag.name = Set(name.to_string());
+        tag.color = Set(color.map(|color| color as i32));
         tag.updated_at = Set(chrono::Utc::now().naive_utc());
-        tag.update(connection.as_ref())
+        tag.update(&transaction)
             .await
-            .map(|_| ())
+            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+        tag_has_tags::Entity::delete_many()
+            .filter(tag_has_tags::Column::SuperTagId.eq(tag_id))
+            .exec(&transaction)
+            .await
+            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+        for id in sub_tag_ids.iter().copied().unique() {
+            tag_has_tags::ActiveModel {
+                super_tag_id: Set(tag_id),
+                sub_tag_id: Set(id),
+                ..Default::default()
+            }
+            .insert(&transaction)
+            .await
+            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+        }
+        transaction
+            .commit()
+            .await
             .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))
     }
 
@@ -667,6 +780,15 @@ impl AppController {
             .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
         file_has_tags::Entity::delete_many()
             .filter(file_has_tags::Column::TagId.eq(tag_id))
+            .exec(&transaction)
+            .await
+            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+        tag_has_tags::Entity::delete_many()
+            .filter(
+                Condition::any()
+                    .add(tag_has_tags::Column::SuperTagId.eq(tag_id))
+                    .add(tag_has_tags::Column::SubTagId.eq(tag_id)),
+            )
             .exec(&transaction)
             .await
             .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
@@ -966,6 +1088,164 @@ mod tests {
         controller.remove_tag(file_id, tag_id).await?;
         controller.delete_tag(tag_id).await?;
         assert!(controller.list_tags().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn renaming_preserves_links_and_removal_only_unlinks_one_file() -> Result<()> {
+        use entity::file_has_tags;
+        use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _};
+
+        let data_home = TempDir::new()?;
+        let content = TempDir::new()?;
+        std::fs::write(content.path().join("one.txt"), "one")?;
+        std::fs::write(content.path().join("two.txt"), "two")?;
+        let controller = AppController::new_in(data_home.path())?;
+        controller.create_library("Tags", content.path()).await?;
+        controller.initialize_workspace().await?;
+        controller.scan().await?;
+        let files = controller.list_files(None, "").await?;
+        let first = files.first().context("Missing first file")?.id();
+        let second = files.get(1).context("Missing second file")?.id();
+        controller.create_tag("Shared").await?;
+        let id = controller
+            .list_tags()
+            .await?
+            .first()
+            .context("Missing tag")?
+            .id();
+        controller.assign_tag(first, id).await?;
+        controller.assign_tag(second, id).await?;
+        controller.create_tag("Taken").await?;
+        assert!(matches!(
+            controller.update_tag(id, "  ", None, &[]).await,
+            Err(ControllerError::InvalidTagName)
+        ));
+        assert!(matches!(
+            controller.update_tag(id, " Taken ", None, &[]).await,
+            Err(ControllerError::TagAlreadyExists)
+        ));
+        assert!(
+            controller
+                .list_tags()
+                .await?
+                .iter()
+                .any(|tag| tag.id() == id && tag.name() == "Shared")
+        );
+        controller.update_tag(id, "  Renamed  ", None, &[]).await?;
+        controller.update_tag(id, "Renamed", None, &[]).await?;
+        assert!(
+            controller
+                .list_tags()
+                .await?
+                .iter()
+                .any(|tag| tag.id() == id && tag.name() == "Renamed")
+        );
+        let connection = controller.database_manager().await?.get_connection();
+        let links = file_has_tags::Entity::find().filter(file_has_tags::Column::TagId.eq(id));
+        assert_eq!(links.clone().all(connection.as_ref()).await?.len(), 2);
+        controller.remove_tag(first, id).await?;
+        controller.remove_tag(first, id).await?;
+        let remaining = links.clone().all(connection.as_ref()).await?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining.first().context("Missing link")?.file_id, second);
+        controller.remove_tag(second, id).await?;
+        assert!(links.all(connection.as_ref()).await?.is_empty());
+        assert_eq!(controller.list_tags().await?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tag_details_are_atomic_and_deletion_cleans_up_links() -> Result<()> {
+        use entity::{file_has_tags, tag_has_tags};
+        use sea_orm::EntityTrait as _;
+
+        let data_home = TempDir::new()?;
+        let content = TempDir::new()?;
+        std::fs::write(content.path().join("one.txt"), "one")?;
+        let controller = AppController::new_in(data_home.path())?;
+        controller.create_library("Tags", content.path()).await?;
+        controller.initialize_workspace().await?;
+        controller.scan().await?;
+        for name in ["A", "B", "C"] {
+            controller.create_tag(name).await?;
+        }
+        let tags = controller.list_tags().await?;
+        let a = tags.first().context("A")?.id();
+        let b = tags.get(1).context("B")?.id();
+        let c = tags.get(2).context("C")?.id();
+        let file_id = controller
+            .list_files(None, "")
+            .await?
+            .first()
+            .context("File")?
+            .id();
+        controller.assign_tag(file_id, b).await?;
+        controller
+            .update_tag(a, " A renamed ", Some(0x0070_baff), &[b, b])
+            .await?;
+        controller.update_tag(b, "B", None, &[c]).await?;
+        let saved = controller.list_tags().await?;
+        let tag = saved.iter().find(|tag| tag.id() == a).context("Saved A")?;
+        assert_eq!(tag.name(), "A renamed");
+        assert_eq!(tag.color(), Some(0x0070_baff));
+        assert_eq!(tag.sub_tag_ids(), &[b]);
+        assert!(matches!(
+            controller.update_tag(a, "Invalid", None, &[a]).await,
+            Err(ControllerError::InvalidTagHierarchy)
+        ));
+        assert!(matches!(
+            controller.update_tag(c, "Invalid", None, &[a]).await,
+            Err(ControllerError::InvalidTagHierarchy)
+        ));
+        assert!(matches!(
+            controller.update_tag(a, "Invalid", None, &[-1]).await,
+            Err(ControllerError::TagNotFound)
+        ));
+        assert!(matches!(
+            controller.update_tag(a, "B", None, &[]).await,
+            Err(ControllerError::TagAlreadyExists)
+        ));
+        assert!(matches!(
+            controller
+                .update_tag(a, "Invalid", Some(0x0100_0000), &[])
+                .await,
+            Err(ControllerError::InvalidTagColor)
+        ));
+        assert_eq!(controller.list_tags().await?, saved);
+        controller.update_tag(a, "A renamed", None, &[]).await?;
+        let cleared = controller.list_tags().await?;
+        let tag = cleared
+            .iter()
+            .find(|tag| tag.id() == a)
+            .context("Cleared A")?;
+        assert_eq!(tag.color(), None);
+        assert!(tag.sub_tag_ids().is_empty());
+        controller
+            .update_tag(a, "A renamed", Some(0x0070_baff), &[b])
+            .await?;
+        controller.delete_tag(b).await?;
+        let remaining = controller.list_tags().await?;
+        assert_eq!(remaining.len(), 2);
+        assert!(
+            remaining
+                .iter()
+                .all(|tag| tag.id() != b && tag.sub_tag_ids().is_empty())
+        );
+        assert_eq!(controller.list_files(None, "").await?.len(), 1);
+        let connection = controller.database_manager().await?.get_connection();
+        assert!(
+            file_has_tags::Entity::find()
+                .all(connection.as_ref())
+                .await?
+                .is_empty()
+        );
+        assert!(
+            tag_has_tags::Entity::find()
+                .all(connection.as_ref())
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 
