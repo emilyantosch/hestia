@@ -13,7 +13,7 @@ use sea_orm::{
     QueryOrder, Set, TransactionTrait,
 };
 use services::fs::scanner::DirectoryScanner;
-use services::fs::watcher::{DatabaseFileWatcherEventHandler, FileWatcher, FileWatcherMessage};
+use services::fs::watcher::{FileWatcher, FileWatcherMessage, store_event};
 use services::thumbnails::generator::ThumbnailGenerator;
 use services::thumbnails::thumbnails::{ThumbnailProcessor, ThumbnailProcessorHandler};
 use std::fmt::{self, Display, Formatter};
@@ -560,17 +560,20 @@ impl AppController {
         };
 
         let (watcher_sender, watcher_receiver) = mpsc::unbounded_channel();
+        let (events_sender, mut events) = mpsc::channel(100);
         let (changes_sender, changes_receiver) = mpsc::unbounded_channel();
-        let event_handler = DatabaseFileWatcherEventHandler {
-            db_operations: FileRepository::new(database_manager),
-            changes: Some(changes_sender),
-        };
         tokio::spawn(async move {
-            if let Err(error) = FileWatcher::new(watcher_receiver)
-                .run(Box::new(event_handler))
-                .await
-            {
+            if let Err(error) = FileWatcher::new(watcher_receiver).run(events_sender).await {
                 tracing::error!(%error, "File watcher stopped");
+            }
+        });
+        tokio::spawn(async move {
+            let repository = FileRepository::new(database_manager);
+            while let Some(event) = events.recv().await {
+                match store_event(event, &repository).await {
+                    Ok(()) => drop(changes_sender.send(())),
+                    Err(error) => tracing::error!("Failed to store event to database: {error:?}"),
+                }
             }
         });
         for path in paths {
