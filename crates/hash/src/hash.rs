@@ -1,4 +1,3 @@
-use async_recursion::async_recursion;
 use blake3::{Hash as Blake3Hash, Hasher};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -88,7 +87,6 @@ impl FileHash {
 }
 
 impl FolderHash {
-    #[async_recursion]
     pub async fn hash(path: &Path) -> Result<FolderHash> {
         let file_id = FileId::extract(path).await?;
 
@@ -110,7 +108,6 @@ impl FolderHash {
         })
     }
 
-    #[async_recursion]
     async fn _hash_folder(path: &Path) -> Result<(Blake3Hash, Blake3Hash)> {
         let mut entries = async_fs::read_dir(path).await?;
         let mut children: BTreeMap<String, (bool, Blake3Hash)> = BTreeMap::new();
@@ -126,7 +123,7 @@ impl FolderHash {
                 children.insert(entry_name, (false, file_hash.content_hash));
                 all_content_hashes.push(file_hash.content_hash);
             } else if metadata.is_dir() {
-                let folder_hash = FolderHash::hash(&entry_path).await?;
+                let folder_hash = Box::pin(FolderHash::hash(&entry_path)).await?;
                 children.insert(entry_name, (true, folder_hash.content_hash));
                 all_content_hashes.push(folder_hash.content_hash);
             }

@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use async_recursion::async_recursion;
 use tokio::fs;
 
 use model::services::file::FileSystemFile as File;
@@ -250,7 +249,6 @@ impl DirectoryScanner {
     }
 
     /// Recursive implementation of directory scanning
-    #[async_recursion]
     async fn scan_directory_impl(
         &self,
         dir_path: &Path,
@@ -288,7 +286,7 @@ impl DirectoryScanner {
 
                 // Recurse into subdirectory if configured
                 if self.config.recursive {
-                    self.scan_directory_impl(&path, files, folders).await?;
+                    Box::pin(self.scan_directory_impl(&path, files, folders)).await?;
                 }
             } else if path.is_file() {
                 // Check if file should be ignored
