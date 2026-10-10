@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use entity::{file_has_tags, files, folders, tag_has_tags, tags};
 use itertools::Itertools;
 use library::library::{Library, LibraryConfig, LibraryPathConfig};
@@ -25,14 +25,14 @@ use tokio::sync::{Mutex, mpsc};
 pub struct LibraryName(String);
 
 impl LibraryName {
-    fn parse(value: &str) -> ControllerResult<Self> {
+    fn parse(value: &str) -> Result<Self> {
         let value = value.trim();
         let mut components = Path::new(value).components();
         if value.is_empty()
             || !matches!(components.next(), Some(Component::Normal(_)))
             || components.next().is_some()
         {
-            return Err(ControllerError::InvalidLibraryName);
+            bail!("Library name must be a single folder name.");
         }
         Ok(Self(value.to_string()))
     }
@@ -56,11 +56,11 @@ pub struct LibraryInfo {
 }
 
 impl LibraryInfo {
-    fn from_path(path: PathBuf) -> ControllerResult<Self> {
+    fn from_path(path: PathBuf) -> Result<Self> {
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or(ControllerError::InvalidLibraryFolderName)?;
+            .context("A library has an invalid folder name.")?;
         Ok(Self {
             name: LibraryName(name.to_string()),
             path,
@@ -225,128 +225,6 @@ impl ScanReport {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ControllerOperation {
-    OpenDataDirectory,
-    ListLibraries,
-    OpenLibrary,
-    CreateLibrary,
-    InitializeLibrary,
-    QueryLibrary,
-    ScanLibrary,
-    StartWatcher,
-    GenerateThumbnails,
-    ManageTags,
-}
-
-impl ControllerOperation {
-    fn action(self) -> &'static str {
-        match self {
-            Self::OpenDataDirectory => "Could not open the application data directory",
-            Self::ListLibraries => "Could not list libraries",
-            Self::OpenLibrary => "Could not open the library",
-            Self::CreateLibrary => "Could not create the library",
-            Self::InitializeLibrary => "Could not initialize the library",
-            Self::QueryLibrary => "Could not query the library",
-            Self::ScanLibrary => "Could not scan the library",
-            Self::StartWatcher => "Could not watch the library folders",
-            Self::GenerateThumbnails => "Could not generate thumbnails",
-            Self::ManageTags => "Could not update tags",
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum ControllerError {
-    InvalidLibraryName,
-    InvalidLibraryFolderName,
-    NotHestiaLibrary,
-    InvalidContentFolder,
-    LibraryAlreadyExists,
-    NoLibrarySelected,
-    MissingStorageFolder,
-    NoContentFolders,
-    InvalidTagName,
-    InvalidTagColor,
-    InvalidTagHierarchy,
-    TagAlreadyExists,
-    FileNotFound,
-    TagNotFound,
-    OperationFailed {
-        operation: ControllerOperation,
-        source: anyhow::Error,
-    },
-}
-
-impl ControllerError {
-    fn operation(operation: ControllerOperation, source: impl Into<anyhow::Error>) -> Self {
-        Self::OperationFailed {
-            operation,
-            source: source.into(),
-        }
-    }
-}
-
-impl Display for ControllerError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidLibraryName => {
-                formatter.write_str("Library name must be a single folder name.")
-            }
-            Self::InvalidLibraryFolderName => {
-                formatter.write_str("A library has an invalid folder name.")
-            }
-            Self::NotHestiaLibrary => {
-                formatter.write_str("The selected folder is not a Hestia library.")
-            }
-            Self::InvalidContentFolder => {
-                formatter.write_str("The library content path must be a folder.")
-            }
-            Self::LibraryAlreadyExists => {
-                formatter.write_str("A library with that name already exists.")
-            }
-            Self::NoLibrarySelected => {
-                formatter.write_str("Select a library before initializing it.")
-            }
-            Self::MissingStorageFolder => formatter.write_str("The library has no storage folder."),
-            Self::NoContentFolders => formatter.write_str("The library has no content folders."),
-            Self::InvalidTagName => formatter.write_str("Tag names cannot be empty."),
-            Self::InvalidTagColor => formatter.write_str("Tag colors must be 24-bit RGB values."),
-            Self::InvalidTagHierarchy => {
-                formatter.write_str("A tag cannot contain itself, directly or through other tags.")
-            }
-            Self::TagAlreadyExists => formatter.write_str("A tag with that name already exists."),
-            Self::FileNotFound => formatter.write_str("The selected file no longer exists."),
-            Self::TagNotFound => formatter.write_str("The selected tag no longer exists."),
-            Self::OperationFailed { operation, source } => {
-                write!(formatter, "{}: {source:#}", operation.action())
-            }
-        }
-    }
-}
-
-impl std::error::Error for ControllerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::OperationFailed { source, .. } => Some(source.as_ref()),
-            _ => None,
-        }
-    }
-}
-
-type ControllerResult<T> = std::result::Result<T, ControllerError>;
-
-trait OperationContext<T> {
-    /// Report an error as a failure of `operation`.
-    fn during(self, operation: ControllerOperation) -> ControllerResult<T>;
-}
-
-impl<T, E: Into<anyhow::Error>> OperationContext<T> for std::result::Result<T, E> {
-    fn during(self, operation: ControllerOperation) -> ControllerResult<T> {
-        self.map_err(|error| ControllerError::operation(operation, error))
-    }
-}
-
 #[derive(Debug)]
 struct Workspace {
     library_paths: Vec<CanonPath>,
@@ -374,21 +252,21 @@ pub struct AppController {
 }
 
 impl AppController {
-    pub fn new() -> ControllerResult<Self> {
+    pub fn new() -> Result<Self> {
         let data_home = library::io::create_or_validate_data_directory()
-            .during(ControllerOperation::OpenDataDirectory)?;
+            .context("Could not open the application data directory")?;
         Self::new_in(data_home)
     }
 
-    pub fn new_in(data_home: impl AsRef<Path>) -> ControllerResult<Self> {
+    pub fn new_in(data_home: impl AsRef<Path>) -> Result<Self> {
         std::fs::create_dir_all(data_home.as_ref())
-            .during(ControllerOperation::OpenDataDirectory)?;
+            .context("Could not open the application data directory")?;
         let data_home = data_home
             .as_ref()
             .canonicalize()
-            .during(ControllerOperation::OpenDataDirectory)?;
+            .context("Could not open the application data directory")?;
         std::fs::create_dir_all(data_home.join("hestia"))
-            .during(ControllerOperation::OpenDataDirectory)?;
+            .context("Could not open the application data directory")?;
 
         Ok(Self {
             data_home,
@@ -396,33 +274,33 @@ impl AppController {
         })
     }
 
-    pub fn list_libraries(&self) -> ControllerResult<Vec<LibraryInfo>> {
+    pub fn list_libraries(&self) -> Result<Vec<LibraryInfo>> {
         let mut libraries = Library::list_libraries_in(&self.data_home)
-            .during(ControllerOperation::ListLibraries)?
+            .context("Could not list libraries")?
             .into_iter()
             .map(PathBuf::from)
             .map(LibraryInfo::from_path)
-            .collect::<ControllerResult<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         libraries.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
         Ok(libraries)
     }
 
-    pub async fn select_library(&self, path: impl AsRef<Path>) -> ControllerResult<LibraryInfo> {
+    pub async fn select_library(&self, path: impl AsRef<Path>) -> Result<LibraryInfo> {
         let path = path
             .as_ref()
             .canonicalize()
-            .during(ControllerOperation::OpenLibrary)?;
+            .context("Could not open the library")?;
         let libraries_root = self.data_home.join("hestia");
         if !path.starts_with(&libraries_root)
             || !path.is_dir()
             || !path.join("config.toml").is_file()
         {
-            return Err(ControllerError::NotHestiaLibrary);
+            bail!("The selected folder is not a Hestia library.");
         }
 
         let library = Library::new_in(&self.data_home)
             .switch_or_create_lib_in(&path, &self.data_home)
-            .during(ControllerOperation::OpenLibrary)?;
+            .context("Could not open the library")?;
         self.activate(library).await
     }
 
@@ -430,22 +308,22 @@ impl AppController {
         &self,
         name: &str,
         content_path: impl AsRef<Path>,
-    ) -> ControllerResult<LibraryInfo> {
+    ) -> Result<LibraryInfo> {
         let name = LibraryName::parse(name)?;
         let content_path = content_path
             .as_ref()
             .canonicalize()
-            .map_err(|_| ControllerError::InvalidContentFolder)?;
+            .context("The library content path must be a folder.")?;
         if !content_path.is_dir() {
-            return Err(ControllerError::InvalidContentFolder);
+            bail!("The library content path must be a folder.");
         }
 
         let share_path = self.data_home.join("hestia").join(name.as_str());
         if share_path
             .try_exists()
-            .during(ControllerOperation::CreateLibrary)?
+            .context("Could not create the library")?
         {
-            return Err(ControllerError::LibraryAlreadyExists);
+            bail!("A library with that name already exists.");
         }
 
         let content_name = content_path
@@ -468,12 +346,12 @@ impl AppController {
         library.library_config = Some(config);
         library
             .save_config()
-            .during(ControllerOperation::CreateLibrary)?;
+            .context("Could not create the library")?;
 
         self.activate(library).await
     }
 
-    pub async fn initialize_workspace(&self) -> ControllerResult<()> {
+    pub async fn initialize_workspace(&self) -> Result<()> {
         let (database_manager, file_operations, library_paths) = self
             .with_workspace(|workspace| {
                 (
@@ -487,18 +365,18 @@ impl AppController {
         Migrator::up(database_manager.get_connection().as_ref(), None)
             .await
             .context("database migration failed")
-            .during(ControllerOperation::InitializeLibrary)?;
+            .context("Could not initialize the library")?;
         if library_paths.is_empty() {
-            return Err(ControllerError::NoContentFolders);
+            bail!("The library has no content folders.");
         }
         file_operations
             .upsert_root_folders(library_paths)
             .await
-            .during(ControllerOperation::InitializeLibrary)?;
+            .context("Could not initialize the library")?;
         Ok(())
     }
 
-    pub async fn scan(&self) -> ControllerResult<ScanReport> {
+    pub async fn scan(&self) -> Result<ScanReport> {
         let (file_operations, library_paths) = self
             .with_workspace(|workspace| {
                 (
@@ -517,20 +395,20 @@ impl AppController {
             let report = scanner
                 .sync_directory(&path)
                 .await
-                .during(ControllerOperation::ScanLibrary)?;
+                .context("Could not scan the library")?;
             result.files_scanned += report.files_scanned;
             result.changed += report.changed();
         }
         Ok(result)
     }
 
-    pub async fn generate_thumbnails(&self) -> ControllerResult<()> {
+    pub async fn generate_thumbnails(&self) -> Result<()> {
         self.with_workspace(|workspace| workspace.thumbnail_processor.queue_missing_files())
             .await?
-            .during(ControllerOperation::GenerateThumbnails)
+            .context("Could not generate thumbnails")
     }
 
-    pub async fn start_watching(&self) -> ControllerResult<mpsc::UnboundedReceiver<()>> {
+    pub async fn start_watching(&self) -> Result<mpsc::UnboundedReceiver<()>> {
         let (watcher_sender, watcher_receiver) = mpsc::unbounded_channel();
         let (database_manager, paths) = self
             .with_workspace(|workspace| {
@@ -544,7 +422,7 @@ impl AppController {
                 ))
             })
             .await?
-            .during(ControllerOperation::StartWatcher)?;
+            .context("Could not watch the library folders")?;
 
         let (events_sender, mut events) = mpsc::channel(100);
         let (changes_sender, changes_receiver) = mpsc::unbounded_channel();
@@ -565,26 +443,22 @@ impl AppController {
         for path in paths {
             watcher_sender
                 .send(FileWatcherMessage::WatchPath(path))
-                .during(ControllerOperation::StartWatcher)?;
+                .context("Could not watch the library folders")?;
         }
         Ok(changes_receiver)
     }
 
-    pub async fn list_folders(&self) -> ControllerResult<Vec<FolderInfo>> {
+    pub async fn list_folders(&self) -> Result<Vec<FolderInfo>> {
         let database_manager = self.database_manager().await?;
         folders::Entity::find()
             .order_by_asc(folders::Column::Name)
             .all(database_manager.get_connection().as_ref())
             .await
             .map(|items| items.into_iter().map_into().collect())
-            .during(ControllerOperation::QueryLibrary)
+            .context("Could not query the library")
     }
 
-    pub async fn list_files(
-        &self,
-        folder_id: Option<i32>,
-        search: &str,
-    ) -> ControllerResult<Vec<FileInfo>> {
+    pub async fn list_files(&self, folder_id: Option<i32>, search: &str) -> Result<Vec<FileInfo>> {
         let database_manager = self.database_manager().await?;
         let connection = database_manager.get_connection();
         let mut condition = Condition::all();
@@ -592,8 +466,8 @@ impl AppController {
             let folder = folders::Entity::find_by_id(folder_id)
                 .one(connection.as_ref())
                 .await
-                .during(ControllerOperation::QueryLibrary)?
-                .ok_or(ControllerError::FileNotFound)?;
+                .context("Could not query the library")?
+                .context("The selected file no longer exists.")?;
             condition = condition.add(files::Column::Path.starts_with(folder.path));
         }
         let search = search.trim();
@@ -611,24 +485,24 @@ impl AppController {
             .all(connection.as_ref())
             .await
             .map(|items| items.into_iter().map_into().collect())
-            .during(ControllerOperation::QueryLibrary)
+            .context("Could not query the library")
     }
 
-    pub async fn list_tags(&self) -> ControllerResult<Vec<TagInfo>> {
+    pub async fn list_tags(&self) -> Result<Vec<TagInfo>> {
         let database_manager = self.database_manager().await?;
         let connection = database_manager.get_connection();
         let mut tags: Vec<TagInfo> = tags::Entity::find()
             .order_by_asc(tags::Column::Name)
             .all(connection.as_ref())
             .await
-            .during(ControllerOperation::QueryLibrary)?
+            .context("Could not query the library")?
             .into_iter()
             .map_into()
             .collect();
         let links = tag_has_tags::Entity::find()
             .all(connection.as_ref())
             .await
-            .during(ControllerOperation::QueryLibrary)?;
+            .context("Could not query the library")?;
         for link in links {
             if let Some(tag) = tags.iter_mut().find(|tag| tag.id == link.super_tag_id) {
                 tag.sub_tag_ids.push(link.sub_tag_id);
@@ -637,7 +511,7 @@ impl AppController {
         Ok(tags)
     }
 
-    pub async fn create_tag(&self, name: &str) -> ControllerResult<()> {
+    pub async fn create_tag(&self, name: &str) -> Result<()> {
         let name = Self::tag_name(name)?;
         let database_manager = self.database_manager().await?;
         let connection = database_manager.get_connection();
@@ -645,7 +519,7 @@ impl AppController {
             .filter(tags::Column::Name.eq(name))
             .one(connection.as_ref())
             .await
-            .during(ControllerOperation::ManageTags)?
+            .context("Could not update tags")?
             .is_some()
         {
             return Ok(());
@@ -661,7 +535,7 @@ impl AppController {
         .insert(connection.as_ref())
         .await
         .map(|_| ())
-        .during(ControllerOperation::ManageTags)
+        .context("Could not update tags")
     }
 
     pub async fn update_tag(
@@ -670,41 +544,38 @@ impl AppController {
         name: &str,
         color: Option<u32>,
         sub_tag_ids: &[i32],
-    ) -> ControllerResult<()> {
+    ) -> Result<()> {
         let name = Self::tag_name(name)?;
         if color.is_some_and(|color| color > 0x00ff_ffff) {
-            return Err(ControllerError::InvalidTagColor);
+            bail!("Tag colors must be 24-bit RGB values.");
         }
         let database_manager = self.database_manager().await?;
         let connection = database_manager.get_connection();
-        let transaction = connection
-            .begin()
-            .await
-            .during(ControllerOperation::ManageTags)?;
+        let transaction = connection.begin().await.context("Could not update tags")?;
         let tag = tags::Entity::find_by_id(tag_id)
             .one(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?
-            .ok_or(ControllerError::TagNotFound)?;
+            .context("Could not update tags")?
+            .context("The selected tag no longer exists.")?;
         if tags::Entity::find()
             .filter(tags::Column::Name.eq(name))
             .filter(tags::Column::Id.ne(tag_id))
             .one(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?
+            .context("Could not update tags")?
             .is_some()
         {
-            return Err(ControllerError::TagAlreadyExists);
+            bail!("A tag with that name already exists.");
         }
         let links = tag_has_tags::Entity::find()
             .all(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?;
+            .context("Could not update tags")?;
         let mut pending = sub_tag_ids.to_vec();
         let mut visited = std::collections::HashSet::new();
         while let Some(id) = pending.pop() {
             if id == tag_id {
-                return Err(ControllerError::InvalidTagHierarchy);
+                bail!("A tag cannot contain itself, directly or through other tags.");
             }
             if visited.insert(id) {
                 pending.extend(
@@ -720,9 +591,9 @@ impl AppController {
             .filter(tags::Column::Id.is_in(sub_tag_ids.clone()))
             .count(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?;
+            .context("Could not update tags")?;
         if found_sub_tags != sub_tag_ids.len() as u64 {
-            return Err(ControllerError::TagNotFound);
+            bail!("The selected tag no longer exists.");
         }
         let mut tag = tag.into_active_model();
         tag.name = Set(name.to_string());
@@ -730,12 +601,12 @@ impl AppController {
         tag.updated_at = Set(chrono::Utc::now().naive_utc());
         tag.update(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?;
+            .context("Could not update tags")?;
         tag_has_tags::Entity::delete_many()
             .filter(tag_has_tags::Column::SuperTagId.eq(tag_id))
             .exec(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?;
+            .context("Could not update tags")?;
         for id in sub_tag_ids {
             tag_has_tags::ActiveModel {
                 super_tag_id: Set(tag_id),
@@ -744,26 +615,20 @@ impl AppController {
             }
             .insert(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?;
+            .context("Could not update tags")?;
         }
-        transaction
-            .commit()
-            .await
-            .during(ControllerOperation::ManageTags)
+        transaction.commit().await.context("Could not update tags")
     }
 
-    pub async fn delete_tag(&self, tag_id: i32) -> ControllerResult<()> {
+    pub async fn delete_tag(&self, tag_id: i32) -> Result<()> {
         let database_manager = self.database_manager().await?;
         let connection = database_manager.get_connection();
-        let transaction = connection
-            .begin()
-            .await
-            .during(ControllerOperation::ManageTags)?;
+        let transaction = connection.begin().await.context("Could not update tags")?;
         file_has_tags::Entity::delete_many()
             .filter(file_has_tags::Column::TagId.eq(tag_id))
             .exec(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?;
+            .context("Could not update tags")?;
         tag_has_tags::Entity::delete_many()
             .filter(
                 Condition::any()
@@ -772,42 +637,39 @@ impl AppController {
             )
             .exec(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?;
+            .context("Could not update tags")?;
         tags::Entity::delete_by_id(tag_id)
             .exec(&transaction)
             .await
-            .during(ControllerOperation::ManageTags)?;
-        transaction
-            .commit()
-            .await
-            .during(ControllerOperation::ManageTags)
+            .context("Could not update tags")?;
+        transaction.commit().await.context("Could not update tags")
     }
 
-    pub async fn assign_tag(&self, file_id: i32, tag_id: i32) -> ControllerResult<()> {
+    pub async fn assign_tag(&self, file_id: i32, tag_id: i32) -> Result<()> {
         let database_manager = self.database_manager().await?;
         let connection = database_manager.get_connection();
         if files::Entity::find_by_id(file_id)
             .one(connection.as_ref())
             .await
-            .during(ControllerOperation::ManageTags)?
+            .context("Could not update tags")?
             .is_none()
         {
-            return Err(ControllerError::FileNotFound);
+            bail!("The selected file no longer exists.");
         }
         if tags::Entity::find_by_id(tag_id)
             .one(connection.as_ref())
             .await
-            .during(ControllerOperation::ManageTags)?
+            .context("Could not update tags")?
             .is_none()
         {
-            return Err(ControllerError::TagNotFound);
+            bail!("The selected tag no longer exists.");
         }
         if file_has_tags::Entity::find()
             .filter(file_has_tags::Column::FileId.eq(file_id))
             .filter(file_has_tags::Column::TagId.eq(tag_id))
             .one(connection.as_ref())
             .await
-            .during(ControllerOperation::ManageTags)?
+            .context("Could not update tags")?
             .is_some()
         {
             return Ok(());
@@ -820,10 +682,10 @@ impl AppController {
         .insert(connection.as_ref())
         .await
         .map(|_| ())
-        .during(ControllerOperation::ManageTags)
+        .context("Could not update tags")
     }
 
-    pub async fn remove_tag(&self, file_id: i32, tag_id: i32) -> ControllerResult<()> {
+    pub async fn remove_tag(&self, file_id: i32, tag_id: i32) -> Result<()> {
         let database_manager = self.database_manager().await?;
         file_has_tags::Entity::delete_many()
             .filter(file_has_tags::Column::FileId.eq(file_id))
@@ -831,43 +693,40 @@ impl AppController {
             .exec(database_manager.get_connection().as_ref())
             .await
             .map(|_| ())
-            .during(ControllerOperation::ManageTags)
+            .context("Could not update tags")
     }
 
     /// Read from the open workspace without holding the state lock across awaits.
-    async fn with_workspace<T>(
-        &self,
-        read: impl FnOnce(&mut Workspace) -> T,
-    ) -> ControllerResult<T> {
+    async fn with_workspace<T>(&self, read: impl FnOnce(&mut Workspace) -> T) -> Result<T> {
         match &mut *self.state.lock().await {
             AppState::Ready { workspace, .. } => Ok(read(workspace)),
-            AppState::AwaitingLibrary => Err(ControllerError::NoLibrarySelected),
+            AppState::AwaitingLibrary => Err(anyhow!("Select a library before initializing it.")),
         }
     }
 
-    async fn database_manager(&self) -> ControllerResult<Arc<DatabaseManager>> {
+    async fn database_manager(&self) -> Result<Arc<DatabaseManager>> {
         self.with_workspace(|workspace| Arc::clone(&workspace.database_manager))
             .await
     }
 
-    fn tag_name(name: &str) -> ControllerResult<&str> {
+    fn tag_name(name: &str) -> Result<&str> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(ControllerError::InvalidTagName);
+            bail!("Tag names cannot be empty.");
         }
         Ok(name)
     }
 
-    async fn activate(&self, library: Library) -> ControllerResult<LibraryInfo> {
+    async fn activate(&self, library: Library) -> Result<LibraryInfo> {
         let info = LibraryInfo::from_path(
             library
                 .share_path
                 .clone()
-                .ok_or(ControllerError::MissingStorageFolder)?,
+                .context("The library has no storage folder.")?,
         )?;
         let workspace = Workspace::open(&library)
             .await
-            .during(ControllerOperation::OpenLibrary)?;
+            .context("Could not open the library")?;
         *self.state.lock().await = AppState::Ready {
             _library: library,
             workspace,
@@ -923,9 +782,16 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppController, ControllerError};
+    use super::AppController;
     use anyhow::{Context, Result, bail};
     use tempfile::TempDir;
+
+    fn error_message<T>(result: Result<T>) -> Result<String> {
+        match result {
+            Ok(_) => bail!("expected an error"),
+            Err(error) => Ok(error.to_string()),
+        }
+    }
 
     #[tokio::test]
     async fn create_library_returns_an_owned_summary() -> Result<()> {
@@ -1106,14 +972,14 @@ mod tests {
         controller.assign_tag(first, id).await?;
         controller.assign_tag(second, id).await?;
         controller.create_tag("Taken").await?;
-        assert!(matches!(
-            controller.update_tag(id, "  ", None, &[]).await,
-            Err(ControllerError::InvalidTagName)
-        ));
-        assert!(matches!(
-            controller.update_tag(id, " Taken ", None, &[]).await,
-            Err(ControllerError::TagAlreadyExists)
-        ));
+        assert_eq!(
+            error_message(controller.update_tag(id, "  ", None, &[]).await)?,
+            "Tag names cannot be empty."
+        );
+        assert_eq!(
+            error_message(controller.update_tag(id, " Taken ", None, &[]).await)?,
+            "A tag with that name already exists."
+        );
         assert!(
             controller
                 .list_tags()
@@ -1179,28 +1045,30 @@ mod tests {
         assert_eq!(tag.name(), "A renamed");
         assert_eq!(tag.color(), Some(0x0070_baff));
         assert_eq!(tag.sub_tag_ids(), &[b]);
-        assert!(matches!(
-            controller.update_tag(a, "Invalid", None, &[a]).await,
-            Err(ControllerError::InvalidTagHierarchy)
-        ));
-        assert!(matches!(
-            controller.update_tag(c, "Invalid", None, &[a]).await,
-            Err(ControllerError::InvalidTagHierarchy)
-        ));
-        assert!(matches!(
-            controller.update_tag(a, "Invalid", None, &[-1]).await,
-            Err(ControllerError::TagNotFound)
-        ));
-        assert!(matches!(
-            controller.update_tag(a, "B", None, &[]).await,
-            Err(ControllerError::TagAlreadyExists)
-        ));
-        assert!(matches!(
-            controller
-                .update_tag(a, "Invalid", Some(0x0100_0000), &[])
-                .await,
-            Err(ControllerError::InvalidTagColor)
-        ));
+        assert_eq!(
+            error_message(controller.update_tag(a, "Invalid", None, &[a]).await)?,
+            "A tag cannot contain itself, directly or through other tags."
+        );
+        assert_eq!(
+            error_message(controller.update_tag(c, "Invalid", None, &[a]).await)?,
+            "A tag cannot contain itself, directly or through other tags."
+        );
+        assert_eq!(
+            error_message(controller.update_tag(a, "Invalid", None, &[-1]).await)?,
+            "The selected tag no longer exists."
+        );
+        assert_eq!(
+            error_message(controller.update_tag(a, "B", None, &[]).await)?,
+            "A tag with that name already exists."
+        );
+        assert_eq!(
+            error_message(
+                controller
+                    .update_tag(a, "Invalid", Some(0x0100_0000), &[])
+                    .await
+            )?,
+            "Tag colors must be 24-bit RGB values."
+        );
         assert_eq!(controller.list_tags().await?, saved);
         controller.update_tag(a, "A renamed", None, &[]).await?;
         let cleared = controller.list_tags().await?;
@@ -1247,10 +1115,7 @@ mod tests {
         controller.initialize_workspace().await?;
 
         let mut changes = controller.start_watching().await?;
-        assert!(matches!(
-            controller.start_watching().await,
-            Err(ControllerError::OperationFailed { .. })
-        ));
+        assert!(controller.start_watching().await.is_err());
         // Let the watcher register the root before creating the file.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         std::fs::write(content.path().join("watched-entry.txt"), "new")?;
@@ -1271,7 +1136,10 @@ mod tests {
             bail!("initialization should require a selected library");
         };
 
-        assert!(matches!(error, ControllerError::NoLibrarySelected));
+        assert_eq!(
+            error.to_string(),
+            "Select a library before initializing it."
+        );
         Ok(())
     }
 
@@ -1285,7 +1153,10 @@ mod tests {
             bail!("library names must not escape the library directory");
         };
 
-        assert!(matches!(error, ControllerError::InvalidLibraryName));
+        assert_eq!(
+            error.to_string(),
+            "Library name must be a single folder name."
+        );
         Ok(())
     }
 }

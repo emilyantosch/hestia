@@ -548,7 +548,7 @@ impl FileManager {
                             this.selected = visible.first().copied();
                         }
                     }
-                    Err(error) => this.tag_error = Some(format!("{error_message}: {error}")),
+                    Err(error) => this.tag_error = Some(format!("{error_message}: {error:#}")),
                 }
                 cx.notify();
             });
