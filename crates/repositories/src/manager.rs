@@ -48,16 +48,6 @@ impl DatabaseManager {
         })
     }
 
-    pub async fn new_sqlite_default() -> Result<Self> {
-        Self::new(DatabaseSettings::new(
-            "sqlite://main.sqlite?mode=rwc".to_string(),
-            30_000,
-            sea_orm::sqlx::sqlite::SqliteJournalMode::Wal,
-            sea_orm::sqlx::sqlite::SqliteSynchronous::Normal,
-        ))
-        .await
-    }
-
     #[must_use]
     pub fn get_connection(&self) -> Arc<DatabaseConnection> {
         Arc::clone(&self.connection)

@@ -1,5 +1,5 @@
 [workspace]
-members = [ "crates/app", "crates/controllers", "crates/entity", "crates/events", "crates/hash", "crates/io", "crates/library", "crates/migration", "crates/model", "crates/repositories", "crates/services", "crates/tests" ]
+members = [ "crates/app", "crates/controllers", "crates/entity", "crates/events", "crates/hash", "crates/library", "crates/migration", "crates/model", "crates/repositories", "crates/services", "crates/tests" ]
 resolver = "3"
 
 [workspace.package]
@@ -42,7 +42,6 @@ controllers = { path = "crates/controllers" }
 entity = { path = "crates/entity" }
 events = { path = "crates/events" }
 hash = { path = "crates/hash" }
-io = { path = "crates/io" }
 library = { path = "crates/library" }
 migration = { path = "crates/migration" }
 model = { path = "crates/model" }
