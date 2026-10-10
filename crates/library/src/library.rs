@@ -148,8 +148,6 @@ impl Library {
     ///     - Ok(false): The save was successful and the file was created
     ///     - Err: The save failed
     pub fn save_config(&self) -> Result<bool> {
-        tracing::info!("Save config started");
-
         let share_path = self
             .share_path
             .as_ref()
@@ -173,10 +171,6 @@ impl Library {
         tracing::info!("Saving config to {config_path:#?}");
 
         io::write_string_to_file(&config_path, &content)?;
-
-        // Verify write
-        let file_contents = io::read_file_to_string(&config_path)?;
-        tracing::debug!("Written config: {file_contents:#?}");
 
         Ok(file_existed)
     }
@@ -203,7 +197,6 @@ impl Library {
         let data_home_path = data_home.into();
         io::ensure_directory_exists(&data_home_path)?;
         self.data_home = Some(data_home_path.clone());
-        tracing::info!("Data home directory verified");
 
         // Validate that share path is within data home
         if !share_path.starts_with(&data_home_path) {
@@ -253,16 +246,12 @@ impl Library {
 
     pub fn list_libraries_in(data_home: impl AsRef<Path>) -> Result<Vec<String>> {
         let share_path = data_home.as_ref().join("hestia");
-        tracing::info!("Listing libraries in {share_path:#?}");
-
         io::ensure_directory_exists(&share_path)?;
 
         let libraries = io::list_directory_entries(&share_path)?
             .into_iter()
             .filter(|path| Path::new(path).join("config.toml").is_file())
             .collect::<Vec<_>>();
-        tracing::info!("Found {} libraries", libraries.len());
-
         Ok(libraries)
     }
 }

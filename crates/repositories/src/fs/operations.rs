@@ -117,17 +117,11 @@ impl FileRepository {
     pub async fn upsert_root_folders(&self, library_paths: Vec<CanonPath>) -> Result<()> {
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
-        tracing::info!("All library_paths are {library_paths:#?}");
 
         for path in library_paths {
-            Self::upsert_root_folder(&transaction, &path)
-                .await
-                .inspect_err(|error| {
-                    tracing::error!("The upsert of a root folder failed due to {error:#?}");
-                })?;
+            Self::upsert_root_folder(&transaction, &path).await?;
         }
         transaction.commit().await?;
-        tracing::info!("Transaction committed");
         Ok(())
     }
 
@@ -246,7 +240,6 @@ impl FileRepository {
 
     /// Delete a file record from the database
     pub async fn delete_file_by_path(&self, file_path: &Path) -> Result<bool> {
-        tracing::info!("FileOperations: Deleting path {file_path:#?} from database");
         let path = Self::database_path(file_path)?;
         let connection = self.database_manager.get_connection();
 

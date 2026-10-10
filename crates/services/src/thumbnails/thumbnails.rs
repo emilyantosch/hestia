@@ -60,7 +60,6 @@ struct ThumbnailWorker {
 
 impl ThumbnailWorker {
     async fn run(self, receiver: JobReceiver) {
-        tracing::info!("Worker {} started", self.worker_id);
         loop {
             let job = receiver.lock().await.recv().await;
             let Some(job) = job else { break };
@@ -83,7 +82,6 @@ impl ThumbnailWorker {
                 }
             }
         }
-        tracing::info!("Worker {} stopped", self.worker_id);
     }
 
     async fn process_job(&self, job: &ThumbnailJob) -> Result<()> {
@@ -223,12 +221,6 @@ impl ThumbnailProcessorHandler {
     pub fn queue_missing_files(&self) -> Result<()> {
         self.sender
             .send(ThumbnailMessage::QueueMissingFiles)
-            .inspect_err(|error| {
-                tracing::error!(
-                    "Sending message to creating missing thumbnails failed due to: {error}"
-                );
-            })?;
-        tracing::info!("Thumbnail tasked with creating missing thumbnails");
-        Ok(())
+            .context("the thumbnail processor has stopped")
     }
 }

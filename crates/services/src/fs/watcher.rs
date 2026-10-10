@@ -67,7 +67,7 @@ impl FileWatcher {
                 let results_sender = results_sender.clone();
                 runtime.spawn(async move {
                     if let Err(error) = results_sender.send(result).await {
-                        tracing::info!("Error sending event result: {error:?}");
+                        tracing::warn!("Error sending event result: {error:?}");
                     }
                 });
             },
@@ -78,7 +78,7 @@ impl FileWatcher {
                 let debounced_events = match result {
                     Ok(debounced_events) => debounced_events,
                     Err(errors) => {
-                        tracing::error!("errors: {errors:?}");
+                        tracing::warn!("Filesystem watcher reported errors: {errors:?}");
                         continue;
                     }
                 };
@@ -86,18 +86,18 @@ impl FileWatcher {
                     match observe(event).await {
                         Ok(Some(event)) => {
                             if let Err(error) = events.send(event).await {
-                                tracing::info!("Error sending processed event: {error:#?}");
+                                tracing::warn!("Error sending processed event: {error:#?}");
                             }
                         }
                         Ok(None) => (),
-                        Err(error) => tracing::error!("Failed to process event: {error:?}"),
+                        Err(error) => tracing::warn!("Failed to process event: {error:#}"),
                     }
                 }
             }
         });
 
         self.watcher = Some(debouncer.context("failed to initialize filesystem watcher")?);
-        tracing::info!("Init of FileWatcher completed successfully!");
+        tracing::info!("File watcher started");
         Ok(())
     }
 
@@ -144,7 +144,7 @@ pub async fn store_event(event: FSEvent, repository: &FileRepository) -> Result<
                     tracing::info!(deleted, "Removed file from database: {}", path.display());
                 }
             }
-            kind => tracing::info!("Ignoring event type: {kind:?}"),
+            _ => (),
         },
         FSEvent::Folder(event) => match event.kind {
             EventKind::Create(_) | EventKind::Modify(_) => {
@@ -157,7 +157,7 @@ pub async fn store_event(event: FSEvent, repository: &FileRepository) -> Result<
                     tracing::info!(deleted, "Removed folder from database: {}", path.display());
                 }
             }
-            kind => tracing::info!("Ignoring event type: {kind:?}"),
+            _ => (),
         },
     }
     Ok(())
@@ -175,7 +175,6 @@ async fn observe(mut event: DebouncedEvent) -> Result<Option<FSEvent>> {
     let path = paths
         .last()
         .context("watcher event does not contain a path")?;
-    tracing::info!("Deciding handling based on event type for {event:#?}");
 
     let is_folder = path.is_dir()
         || matches!(

@@ -88,7 +88,6 @@ impl DirectoryScanner {
             .file_operations
             .get_database_folder_state(dir_path)
             .await?;
-        tracing::info!("Found {} files in database", db_files.len());
 
         let (files, folders) = self
             .scan_filesystem_recursive(dir_path)
@@ -96,11 +95,6 @@ impl DirectoryScanner {
             .context("Failed to scan filesystem state")?;
         report.files_scanned = files.len();
         report.folders_scanned = folders.len();
-        tracing::info!(
-            "Found {} files and {} folders in filesystem",
-            files.len(),
-            folders.len()
-        );
 
         let file_plan = Self::plan(&db_files, files, |db_file, file: &File| {
             db_file.content_digest != file.content_digest

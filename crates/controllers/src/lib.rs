@@ -436,7 +436,7 @@ impl AppController {
             while let Some(event) = events.recv().await {
                 match store_event(event, &repository).await {
                     Ok(()) => drop(changes_sender.send(())),
-                    Err(error) => tracing::error!("Failed to store event to database: {error:?}"),
+                    Err(error) => tracing::warn!("Failed to store event to database: {error:#}"),
                 }
             }
         });
