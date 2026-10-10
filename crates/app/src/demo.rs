@@ -178,7 +178,7 @@ impl DemoLibrary {
         let controller = Arc::clone(&self.controller);
         self.runtime.spawn(async move {
             controller.create_tag(&name).await?;
-            Ok(controller.list_tags().await?)
+            controller.list_tags().await
         })
     }
 
@@ -202,7 +202,7 @@ impl DemoLibrary {
             controller
                 .update_tag(tag_id, &name, color, &sub_tag_ids)
                 .await?;
-            Ok(controller.list_tags().await?)
+            controller.list_tags().await
         })
     }
 
@@ -210,7 +210,7 @@ impl DemoLibrary {
         let controller = Arc::clone(&self.controller);
         self.runtime.spawn(async move {
             controller.delete_tag(tag_id).await?;
-            Ok(controller.list_tags().await?)
+            controller.list_tags().await
         })
     }
 

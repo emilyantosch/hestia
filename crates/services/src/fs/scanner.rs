@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,68 +8,41 @@ use tokio::fs;
 
 use model::services::file::FileSystemFile as File;
 use model::services::folder::FileSystemFolder as Folder;
-use repositories::fs::operations::{FileMetadata, FileRepository as FileOperations};
-
-/// Types of synchronization operations
-#[derive(Debug, Clone)]
-pub enum SyncOperation {
-    /// Insert a new file into the database
-    InsertFile(File),
-    InsertFolder(Folder),
-    /// Update an existing file in the database
-    UpdateFile(File),
-    UpdateFolder(Folder),
-    /// Delete a file from the database (file no longer exists)
-    DeleteFile(PathBuf),
-    DeleteFolder(PathBuf),
-}
+use repositories::fs::operations::FileRepository as FileOperations;
 
 /// Report of synchronization operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SyncReport {
     pub files_scanned: usize,
     pub files_inserted: usize,
     pub files_updated: usize,
     pub files_deleted: usize,
-    pub files_skipped: usize,
     pub folders_scanned: usize,
     pub folders_inserted: usize,
     pub folders_updated: usize,
     pub folders_deleted: usize,
-    pub folders_skipped: usize,
     pub errors: Vec<String>,
     pub duration: std::time::Duration,
 }
 
-impl Default for SyncReport {
-    fn default() -> Self {
-        Self::new()
+impl SyncReport {
+    /// Number of inserted, updated, or deleted files and folders.
+    #[must_use]
+    pub fn changed(&self) -> usize {
+        self.files_inserted
+            + self.files_updated
+            + self.files_deleted
+            + self.folders_inserted
+            + self.folders_updated
+            + self.folders_deleted
     }
 }
 
-impl SyncReport {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            files_scanned: 0,
-            files_inserted: 0,
-            files_updated: 0,
-            files_deleted: 0,
-            files_skipped: 0,
-            folders_scanned: 0,
-            folders_inserted: 0,
-            folders_updated: 0,
-            folders_deleted: 0,
-            folders_skipped: 0,
-            errors: Vec::new(),
-            duration: std::time::Duration::from_secs(0),
-        }
-    }
-
-    #[must_use]
-    pub fn total_operations(&self) -> usize {
-        self.files_inserted + self.files_updated + self.files_deleted
-    }
+/// Database changes needed to make the database match the filesystem.
+#[derive(Debug, Default)]
+struct SyncPlan<T> {
+    upserts: Vec<T>,
+    deletes: Vec<PathBuf>,
 }
 
 /// Directory scanner that synchronizes filesystem state with database
@@ -83,10 +56,7 @@ impl DirectoryScanner {
     /// Create a new directory scanner
     #[must_use]
     pub fn new(file_operations: Arc<FileOperations>) -> Self {
-        Self {
-            file_operations,
-            config: ScanConfig::default(),
-        }
+        Self::new_with_config(file_operations, ScanConfig::default())
     }
 
     /// Create a new directory scanner with custom configuration
@@ -99,17 +69,13 @@ impl DirectoryScanner {
     }
 
     /// Synchronize a directory with the database
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the linear synchronization workflow is clearer in one place"
-    )]
     pub async fn sync_directory(
         &self,
         dir_path: &model::services::CanonPath,
     ) -> Result<SyncReport> {
         let dir_path = dir_path.as_ref();
         let start_time = Instant::now();
-        let mut report = SyncReport::new();
+        let mut report = SyncReport::default();
 
         tracing::info!("Starting directory sync for: {}", dir_path.display());
 
@@ -117,97 +83,63 @@ impl DirectoryScanner {
             .file_operations
             .get_database_state(dir_path)
             .await
-            .inspect_err(|error| {
-                report
-                    .errors
-                    .push(format!("failed to get database state: {error}"));
-            })?;
-
+            .context("failed to get database state")?;
         let db_folders = self
             .file_operations
             .get_database_folder_state(dir_path)
             .await?;
-        tracing::info!("Found {} files in database", db_files.len());
 
-        let (files, folders) =
-            self.scan_filesystem_recursive(dir_path)
-                .await
-                .inspect_err(|error| {
-                    report
-                        .errors
-                        .push(format!("Failed to scan filesystem state: {error}"));
-                })?;
-
+        let (files, folders) = self
+            .scan_filesystem_recursive(dir_path)
+            .await
+            .context("Failed to scan filesystem state")?;
         report.files_scanned = files.len();
-        tracing::info!("Found {} files in filesystem", files.len());
-
         report.folders_scanned = folders.len();
-        tracing::info!("Found {} folders in filesystem", folders.len());
 
-        // 3a. Calculate file sync operations
-        let mut operations: Vec<SyncOperation> =
-            Self::calculate_file_sync_operations(&db_files, files);
-        tracing::info!("Calculated {} file operations to perform", operations.len());
+        let file_plan = Self::plan(&db_files, files, |db_file, file: &File| {
+            db_file.content_digest != file.content_digest
+                || db_file.filesystem_object_id != file.filesystem_object_id
+        });
+        let folder_plan = Self::plan(&db_folders, folders, |db_folder, folder: &Folder| {
+            db_folder.name != folder.name
+                || u64::try_from(db_folder.device_id).ok()
+                    != Some(folder.filesystem_object_id.device)
+                || u64::try_from(db_folder.inode).ok() != Some(folder.filesystem_object_id.inode)
+        });
 
-        // 3b. Calculate all sync operations
-        operations.extend(Self::calculate_folder_sync_operations(&db_folders, folders));
-        tracing::info!(
-            "Calculated {} file and folder operations to perform",
-            operations.len()
-        );
-
-        // 4. Execute operations in batches
-        let mut upsert_file_batch = Vec::new();
-        let mut delete_file_batch = Vec::new();
-
-        let mut upsert_folder_batch = Vec::new();
-        let mut delete_folder_batch = Vec::new();
-
-        //TODO: Split up into files and folders, may need to implement trait dependency injection
-        //to make it more ergonomic in the future
-        for operation in operations {
-            match operation {
-                SyncOperation::InsertFile(file_info) | SyncOperation::UpdateFile(file_info) => {
-                    upsert_file_batch.push(file_info);
-                    if upsert_file_batch.len() >= self.config.batch_size {
-                        self.execute_upsert_file_batch(&mut upsert_file_batch, &mut report)
-                            .await;
-                    }
+        let batch_size = self.config.batch_size.max(1);
+        let repository = &self.file_operations;
+        for batch in file_plan.upserts.chunks(batch_size) {
+            match repository.batch_upsert_files(batch.to_vec()).await {
+                Ok(result) => {
+                    report.files_inserted += result.file_inserted;
+                    report.files_updated += result.file_updated;
                 }
-                SyncOperation::InsertFolder(folder_info)
-                | SyncOperation::UpdateFolder(folder_info) => {
-                    upsert_folder_batch.push(folder_info);
-                    if upsert_folder_batch.len() >= self.config.batch_size {
-                        self.execute_upsert_folder_batch(&mut upsert_folder_batch, &mut report)
-                            .await;
-                    }
-                }
-                SyncOperation::DeleteFile(path) => {
-                    delete_file_batch.push(path);
-                    if delete_file_batch.len() >= self.config.batch_size {
-                        self.execute_delete_file_batch(&mut delete_file_batch, &mut report)
-                            .await;
-                    }
-                }
-                SyncOperation::DeleteFolder(path) => {
-                    delete_folder_batch.push(path);
-                    if delete_folder_batch.len() >= self.config.batch_size {
-                        self.execute_delete_folder_batch(&mut delete_folder_batch, &mut report)
-                            .await;
-                    }
-                }
+                Err(error) => report.errors.push(error.to_string()),
             }
         }
-
-        // Execute remaining batches
-        self.execute_upsert_file_batch(&mut upsert_file_batch, &mut report)
-            .await;
-        self.execute_upsert_folder_batch(&mut upsert_folder_batch, &mut report)
-            .await;
-        self.execute_delete_file_batch(&mut delete_file_batch, &mut report)
-            .await;
-        self.execute_delete_folder_batch(&mut delete_folder_batch, &mut report)
-            .await;
+        // Folders are upserted in scan order, so parents are stored before their children.
+        for batch in folder_plan.upserts.chunks(batch_size) {
+            match repository.batch_upsert_folders(batch.to_vec()).await {
+                Ok(result) => {
+                    report.folders_inserted += result.folder_inserted;
+                    report.folders_updated += result.folder_updated;
+                }
+                Err(error) => report.errors.push(error.to_string()),
+            }
+        }
+        for batch in file_plan.deletes.chunks(batch_size) {
+            match repository.batch_delete_files(batch.to_vec()).await {
+                Ok(count) => report.files_deleted += count,
+                Err(error) => report.errors.push(error.to_string()),
+            }
+        }
+        for batch in folder_plan.deletes.chunks(batch_size) {
+            match repository.batch_delete_folders(batch.to_vec()).await {
+                Ok(count) => report.folders_deleted += count,
+                Err(error) => report.errors.push(error.to_string()),
+            }
+        }
         report.duration = start_time.elapsed();
 
         ensure!(
@@ -215,25 +147,15 @@ impl DirectoryScanner {
             "Directory sync failed: {}",
             report.errors.join("; ")
         );
-
-        //NOTE: This could be removed in the future if I do not find any worth in it
-        println!("Directory sync completed in {:?}", report.duration);
-        println!(
-            r"Results: 
-            {} files inserted,
-            {} folders inserted,
-            {} files updated, 
-            {} folders updated, 
-            {} files deleted, 
-            {} folders deleted, 
-            {} errors",
-            report.files_inserted,
-            report.folders_inserted,
-            report.files_updated,
-            report.folders_updated,
-            report.files_deleted,
-            report.folders_deleted,
-            report.errors.len()
+        tracing::info!(
+            duration = ?report.duration,
+            files_inserted = report.files_inserted,
+            files_updated = report.files_updated,
+            files_deleted = report.files_deleted,
+            folders_inserted = report.folders_inserted,
+            folders_updated = report.folders_updated,
+            folders_deleted = report.folders_deleted,
+            "Directory sync completed"
         );
 
         Ok(report)
@@ -315,142 +237,46 @@ impl DirectoryScanner {
         Ok(())
     }
 
-    /// Calculate what operations need to be performed
-    fn calculate_file_sync_operations(
-        db_state: &HashMap<PathBuf, FileMetadata>,
-        fs_files: Vec<File>,
-    ) -> Vec<SyncOperation> {
-        let mut operations = Vec::new();
-        let mut processed_paths = std::collections::HashSet::new();
-
-        // Check filesystem files against database
-        for fs_file in fs_files {
-            processed_paths.insert(fs_file.path.clone());
-
-            match db_state.get(&fs_file.path) {
-                Some(db_metadata) => {
-                    // File exists in database, check if it needs updating
-                    if db_metadata.content_digest != fs_file.content_digest
-                        || db_metadata.filesystem_object_id != fs_file.filesystem_object_id
-                    {
-                        operations.push(SyncOperation::UpdateFile(fs_file));
-                    }
-                    // If hashes match, no operation needed
-                }
-                None => {
-                    // File doesn't exist in database, insert it
-                    operations.push(SyncOperation::InsertFile(fs_file));
-                }
-            }
-        }
-
-        // Check for files in database that no longer exist in filesystem
-        for db_path in db_state.keys() {
-            if !processed_paths.contains(db_path) {
-                operations.push(SyncOperation::DeleteFile(db_path.to_owned()));
-            }
-        }
-        operations
+    /// Upsert new or changed scanned entries and delete stored entries that were not scanned.
+    fn plan<T: HasPath, Stored>(
+        db_state: &HashMap<PathBuf, Stored>,
+        scanned: Vec<T>,
+        changed: impl Fn(&Stored, &T) -> bool,
+    ) -> SyncPlan<T> {
+        let scanned_paths: HashSet<PathBuf> = scanned
+            .iter()
+            .map(|entry| entry.path().to_owned())
+            .collect();
+        let upserts = scanned
+            .into_iter()
+            .filter(|entry| {
+                db_state
+                    .get(entry.path())
+                    .is_none_or(|stored| changed(stored, entry))
+            })
+            .collect();
+        let deletes = db_state
+            .keys()
+            .filter(|path| !scanned_paths.contains(*path))
+            .cloned()
+            .collect();
+        SyncPlan { upserts, deletes }
     }
+}
 
-    fn calculate_folder_sync_operations(
-        db_state: &HashMap<PathBuf, entity::folders::Model>,
-        fs_folders: Vec<Folder>,
-    ) -> Vec<SyncOperation> {
-        let mut operations = Vec::new();
-        let mut processed_paths = std::collections::HashSet::new();
+trait HasPath {
+    fn path(&self) -> &Path;
+}
 
-        // Check filesystem files against database
-        for fs_folder in fs_folders {
-            processed_paths.insert(fs_folder.path.clone());
-
-            match db_state.get(&fs_folder.path) {
-                Some(existing) => {
-                    if existing.name != fs_folder.name
-                        || u64::try_from(existing.device_id).ok()
-                            != Some(fs_folder.filesystem_object_id.device)
-                        || u64::try_from(existing.inode).ok()
-                            != Some(fs_folder.filesystem_object_id.inode)
-                    {
-                        operations.push(SyncOperation::UpdateFolder(fs_folder));
-                    }
-                }
-                None => {
-                    // File doesn't exist in database, insert it
-                    operations.push(SyncOperation::InsertFolder(fs_folder));
-                }
-            }
-        }
-
-        // Check for files in database that no longer exist in filesystem
-        for db_path in db_state.keys() {
-            if !processed_paths.contains(db_path) {
-                operations.push(SyncOperation::DeleteFolder(db_path.to_owned()));
-            }
-        }
-        operations
+impl HasPath for File {
+    fn path(&self) -> &Path {
+        &self.path
     }
+}
 
-    /// Execute a batch of insert/update operations
-    async fn execute_upsert_file_batch(&self, batch: &mut Vec<File>, report: &mut SyncReport) {
-        match self.file_operations.batch_upsert_files(batch.clone()).await {
-            Ok(result) => {
-                report.files_inserted += result.file_inserted;
-                report.files_updated += result.file_updated;
-            }
-            Err(error) => report.errors.push(error.to_string()),
-        }
-        batch.clear();
-    }
-
-    async fn execute_upsert_folder_batch(&self, batch: &mut Vec<Folder>, report: &mut SyncReport) {
-        if batch.is_empty() {
-            return;
-        }
-
-        match self
-            .file_operations
-            .batch_upsert_folders(batch.clone())
-            .await
-        {
-            Ok(result) => {
-                report.folders_inserted += result.folder_inserted;
-                report.folders_updated += result.folder_updated;
-            }
-            Err(error) => report.errors.push(error.to_string()),
-        }
-
-        batch.clear();
-    }
-
-    /// Execute a batch of delete operations
-    async fn execute_delete_file_batch(&self, batch: &mut Vec<PathBuf>, report: &mut SyncReport) {
-        if batch.is_empty() {
-            return;
-        }
-
-        match self.file_operations.batch_delete_files(batch.clone()).await {
-            Ok(count) => report.files_deleted += count,
-            Err(error) => report.errors.push(error.to_string()),
-        }
-        batch.clear();
-    }
-
-    /// Execute a batch of delete operations
-    async fn execute_delete_folder_batch(&self, batch: &mut Vec<PathBuf>, report: &mut SyncReport) {
-        if batch.is_empty() {
-            return;
-        }
-
-        match self
-            .file_operations
-            .batch_delete_folders(batch.clone())
-            .await
-        {
-            Ok(count) => report.folders_deleted += count,
-            Err(error) => report.errors.push(error.to_string()),
-        }
-        batch.clear();
+impl HasPath for Folder {
+    fn path(&self) -> &Path {
+        &self.path
     }
 }
 

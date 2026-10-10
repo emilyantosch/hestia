@@ -3908,10 +3908,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
- "serde",
  "tempfile",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4500,10 +4498,6 @@ checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
 dependencies = [
  "rustversion",
 ]
-
-[[package]]
-name = "io"
-version = "0.1.0"
 
 [[package]]
 name = "io-surface"
@@ -8271,7 +8265,6 @@ name = "services"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "chrono",
  "entity",
  "events",

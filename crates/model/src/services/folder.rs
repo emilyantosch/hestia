@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local};
 use hash::FilesystemObjectId;
 use std::path::{Path, PathBuf};
 
@@ -31,15 +30,4 @@ impl FileSystemFolder {
             parent_folder_id: None,
         })
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct PersistedFolder {
-    pub id: i32,
-    pub path: PathBuf,
-    pub name: String,
-    pub filesystem_object_id: FilesystemObjectId,
-    pub parent_folder_id: Option<i32>,
-    pub created_at: DateTime<Local>,
-    pub updated_at: DateTime<Local>,
 }
