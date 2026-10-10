@@ -9,8 +9,8 @@ use repositories::fs::operations::FileRepository;
 use repositories::manager::DatabaseManager;
 use repositories::thumbnail::operations::ThumbnailOperations;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, IntoActiveModel, PaginatorTrait,
+    QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use services::fs::scanner::DirectoryScanner;
 use services::fs::watcher::{FileWatcher, FileWatcherMessage, store_event};
@@ -184,9 +184,7 @@ impl TagInfo {
     pub fn name(&self) -> &str {
         &self.name
     }
-}
 
-impl TagInfo {
     #[must_use]
     pub fn color(&self) -> Option<u32> {
         self.color
@@ -338,13 +336,25 @@ impl std::error::Error for ControllerError {
 
 type ControllerResult<T> = std::result::Result<T, ControllerError>;
 
+trait OperationContext<T> {
+    /// Report an error as a failure of `operation`.
+    fn during(self, operation: ControllerOperation) -> ControllerResult<T>;
+}
+
+impl<T, E: Into<anyhow::Error>> OperationContext<T> for std::result::Result<T, E> {
+    fn during(self, operation: ControllerOperation) -> ControllerResult<T> {
+        self.map_err(|error| ControllerError::operation(operation, error))
+    }
+}
+
 #[derive(Debug)]
 struct Workspace {
     library_paths: Vec<CanonPath>,
     database_manager: Arc<DatabaseManager>,
     file_operations: Arc<FileRepository>,
     thumbnail_processor: ThumbnailProcessorHandler,
-    watcher_started: bool,
+    // The watcher runs until this sender is dropped with the workspace.
+    watcher: Option<mpsc::UnboundedSender<FileWatcherMessage>>,
 }
 
 #[derive(Debug)]
@@ -365,22 +375,20 @@ pub struct AppController {
 
 impl AppController {
     pub fn new() -> ControllerResult<Self> {
-        let data_home = library::io::create_or_validate_data_directory().map_err(|error| {
-            ControllerError::operation(ControllerOperation::OpenDataDirectory, error)
-        })?;
+        let data_home = library::io::create_or_validate_data_directory()
+            .during(ControllerOperation::OpenDataDirectory)?;
         Self::new_in(data_home)
     }
 
     pub fn new_in(data_home: impl AsRef<Path>) -> ControllerResult<Self> {
-        std::fs::create_dir_all(data_home.as_ref()).map_err(|error| {
-            ControllerError::operation(ControllerOperation::OpenDataDirectory, error)
-        })?;
-        let data_home = data_home.as_ref().canonicalize().map_err(|error| {
-            ControllerError::operation(ControllerOperation::OpenDataDirectory, error)
-        })?;
-        std::fs::create_dir_all(data_home.join("hestia")).map_err(|error| {
-            ControllerError::operation(ControllerOperation::OpenDataDirectory, error)
-        })?;
+        std::fs::create_dir_all(data_home.as_ref())
+            .during(ControllerOperation::OpenDataDirectory)?;
+        let data_home = data_home
+            .as_ref()
+            .canonicalize()
+            .during(ControllerOperation::OpenDataDirectory)?;
+        std::fs::create_dir_all(data_home.join("hestia"))
+            .during(ControllerOperation::OpenDataDirectory)?;
 
         Ok(Self {
             data_home,
@@ -390,7 +398,7 @@ impl AppController {
 
     pub fn list_libraries(&self) -> ControllerResult<Vec<LibraryInfo>> {
         let mut libraries = Library::list_libraries_in(&self.data_home)
-            .map_err(|error| ControllerError::operation(ControllerOperation::ListLibraries, error))?
+            .during(ControllerOperation::ListLibraries)?
             .into_iter()
             .map(PathBuf::from)
             .map(LibraryInfo::from_path)
@@ -403,7 +411,7 @@ impl AppController {
         let path = path
             .as_ref()
             .canonicalize()
-            .map_err(|error| ControllerError::operation(ControllerOperation::OpenLibrary, error))?;
+            .during(ControllerOperation::OpenLibrary)?;
         let libraries_root = self.data_home.join("hestia");
         if !path.starts_with(&libraries_root)
             || !path.is_dir()
@@ -414,7 +422,7 @@ impl AppController {
 
         let library = Library::new_in(&self.data_home)
             .switch_or_create_lib_in(&path, &self.data_home)
-            .map_err(|error| ControllerError::operation(ControllerOperation::OpenLibrary, error))?;
+            .during(ControllerOperation::OpenLibrary)?;
         self.activate(library).await
     }
 
@@ -433,9 +441,10 @@ impl AppController {
         }
 
         let share_path = self.data_home.join("hestia").join(name.as_str());
-        if share_path.try_exists().map_err(|error| {
-            ControllerError::operation(ControllerOperation::CreateLibrary, error)
-        })? {
+        if share_path
+            .try_exists()
+            .during(ControllerOperation::CreateLibrary)?
+        {
             return Err(ControllerError::LibraryAlreadyExists);
         }
 
@@ -457,55 +466,47 @@ impl AppController {
         let mut library = Library::new_in(&self.data_home);
         library.share_path = Some(share_path);
         library.library_config = Some(config);
-        library.save_config().map_err(|error| {
-            ControllerError::operation(ControllerOperation::CreateLibrary, error)
-        })?;
+        library
+            .save_config()
+            .during(ControllerOperation::CreateLibrary)?;
 
         self.activate(library).await
     }
 
     pub async fn initialize_workspace(&self) -> ControllerResult<()> {
-        let (database_manager, file_operations, library_paths) = {
-            let state = self.state.lock().await;
-            let AppState::Ready { workspace, .. } = &*state else {
-                return Err(ControllerError::NoLibrarySelected);
-            };
-            (
-                Arc::clone(&workspace.database_manager),
-                Arc::clone(&workspace.file_operations),
-                workspace.library_paths.clone(),
-            )
-        };
+        let (database_manager, file_operations, library_paths) = self
+            .with_workspace(|workspace| {
+                (
+                    Arc::clone(&workspace.database_manager),
+                    Arc::clone(&workspace.file_operations),
+                    workspace.library_paths.clone(),
+                )
+            })
+            .await?;
 
         Migrator::up(database_manager.get_connection().as_ref(), None)
             .await
             .context("database migration failed")
-            .map_err(|error| {
-                ControllerError::operation(ControllerOperation::InitializeLibrary, error)
-            })?;
+            .during(ControllerOperation::InitializeLibrary)?;
         if library_paths.is_empty() {
             return Err(ControllerError::NoContentFolders);
         }
         file_operations
             .upsert_root_folders(library_paths)
             .await
-            .map_err(|error| {
-                ControllerError::operation(ControllerOperation::InitializeLibrary, error)
-            })?;
+            .during(ControllerOperation::InitializeLibrary)?;
         Ok(())
     }
 
     pub async fn scan(&self) -> ControllerResult<ScanReport> {
-        let (file_operations, library_paths) = {
-            let state = self.state.lock().await;
-            let AppState::Ready { workspace, .. } = &*state else {
-                return Err(ControllerError::NoLibrarySelected);
-            };
-            (
-                Arc::clone(&workspace.file_operations),
-                workspace.library_paths.clone(),
-            )
-        };
+        let (file_operations, library_paths) = self
+            .with_workspace(|workspace| {
+                (
+                    Arc::clone(&workspace.file_operations),
+                    workspace.library_paths.clone(),
+                )
+            })
+            .await?;
 
         let scanner = DirectoryScanner::new(file_operations);
         let mut result = ScanReport {
@@ -513,53 +514,38 @@ impl AppController {
             changed: 0,
         };
         for path in library_paths {
-            let report = scanner.sync_directory(&path).await.map_err(|error| {
-                ControllerError::operation(ControllerOperation::ScanLibrary, error)
-            })?;
+            let report = scanner
+                .sync_directory(&path)
+                .await
+                .during(ControllerOperation::ScanLibrary)?;
             result.files_scanned += report.files_scanned;
-            result.changed += report.files_inserted
-                + report.files_updated
-                + report.files_deleted
-                + report.folders_inserted
-                + report.folders_updated
-                + report.folders_deleted;
+            result.changed += report.changed();
         }
         Ok(result)
     }
 
     pub async fn generate_thumbnails(&self) -> ControllerResult<()> {
-        let state = self.state.lock().await;
-        let AppState::Ready { workspace, .. } = &*state else {
-            return Err(ControllerError::NoLibrarySelected);
-        };
-        workspace
-            .thumbnail_processor
-            .queue_missing_files()
-            .map_err(|error| {
-                ControllerError::operation(ControllerOperation::GenerateThumbnails, error)
-            })
+        self.with_workspace(|workspace| workspace.thumbnail_processor.queue_missing_files())
+            .await?
+            .during(ControllerOperation::GenerateThumbnails)
     }
 
     pub async fn start_watching(&self) -> ControllerResult<mpsc::UnboundedReceiver<()>> {
-        let (database_manager, paths) = {
-            let mut state = self.state.lock().await;
-            let AppState::Ready { workspace, .. } = &mut *state else {
-                return Err(ControllerError::NoLibrarySelected);
-            };
-            if workspace.watcher_started {
-                return Err(ControllerError::operation(
-                    ControllerOperation::StartWatcher,
-                    anyhow::anyhow!("the library is already being watched"),
-                ));
-            }
-            workspace.watcher_started = true;
-            (
-                Arc::clone(&workspace.database_manager),
-                workspace.library_paths.clone(),
-            )
-        };
-
         let (watcher_sender, watcher_receiver) = mpsc::unbounded_channel();
+        let (database_manager, paths) = self
+            .with_workspace(|workspace| {
+                if workspace.watcher.is_some() {
+                    return Err(anyhow::anyhow!("the library is already being watched"));
+                }
+                workspace.watcher = Some(watcher_sender.clone());
+                Ok((
+                    Arc::clone(&workspace.database_manager),
+                    workspace.library_paths.clone(),
+                ))
+            })
+            .await?
+            .during(ControllerOperation::StartWatcher)?;
+
         let (events_sender, mut events) = mpsc::channel(100);
         let (changes_sender, changes_receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -579,9 +565,7 @@ impl AppController {
         for path in paths {
             watcher_sender
                 .send(FileWatcherMessage::WatchPath(path))
-                .map_err(|error| {
-                    ControllerError::operation(ControllerOperation::StartWatcher, error)
-                })?;
+                .during(ControllerOperation::StartWatcher)?;
         }
         Ok(changes_receiver)
     }
@@ -593,7 +577,7 @@ impl AppController {
             .all(database_manager.get_connection().as_ref())
             .await
             .map(|items| items.into_iter().map_into().collect())
-            .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
+            .during(ControllerOperation::QueryLibrary)
     }
 
     pub async fn list_files(
@@ -608,9 +592,7 @@ impl AppController {
             let folder = folders::Entity::find_by_id(folder_id)
                 .one(connection.as_ref())
                 .await
-                .map_err(|error| {
-                    ControllerError::operation(ControllerOperation::QueryLibrary, error)
-                })?
+                .during(ControllerOperation::QueryLibrary)?
                 .ok_or(ControllerError::FileNotFound)?;
             condition = condition.add(files::Column::Path.starts_with(folder.path));
         }
@@ -629,7 +611,7 @@ impl AppController {
             .all(connection.as_ref())
             .await
             .map(|items| items.into_iter().map_into().collect())
-            .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))
+            .during(ControllerOperation::QueryLibrary)
     }
 
     pub async fn list_tags(&self) -> ControllerResult<Vec<TagInfo>> {
@@ -639,16 +621,14 @@ impl AppController {
             .order_by_asc(tags::Column::Name)
             .all(connection.as_ref())
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::QueryLibrary, error))?
+            .during(ControllerOperation::QueryLibrary)?
             .into_iter()
             .map_into()
             .collect();
         let links = tag_has_tags::Entity::find()
             .all(connection.as_ref())
             .await
-            .map_err(|error| {
-                ControllerError::operation(ControllerOperation::QueryLibrary, error)
-            })?;
+            .during(ControllerOperation::QueryLibrary)?;
         for link in links {
             if let Some(tag) = tags.iter_mut().find(|tag| tag.id == link.super_tag_id) {
                 tag.sub_tag_ids.push(link.sub_tag_id);
@@ -665,22 +645,23 @@ impl AppController {
             .filter(tags::Column::Name.eq(name))
             .one(connection.as_ref())
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?
+            .during(ControllerOperation::ManageTags)?
             .is_some()
         {
             return Ok(());
         }
+        let now = chrono::Utc::now().naive_utc();
         tags::ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
             name: Set(name.to_string()),
             color: Set(None),
-            created_at: Set(chrono::Utc::now().naive_utc()),
-            updated_at: Set(chrono::Utc::now().naive_utc()),
+            created_at: Set(now),
+            updated_at: Set(now),
         }
         .insert(connection.as_ref())
         .await
         .map(|_| ())
-        .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))
+        .during(ControllerOperation::ManageTags)
     }
 
     pub async fn update_tag(
@@ -699,18 +680,18 @@ impl AppController {
         let transaction = connection
             .begin()
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+            .during(ControllerOperation::ManageTags)?;
         let tag = tags::Entity::find_by_id(tag_id)
             .one(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?
+            .during(ControllerOperation::ManageTags)?
             .ok_or(ControllerError::TagNotFound)?;
         if tags::Entity::find()
             .filter(tags::Column::Name.eq(name))
             .filter(tags::Column::Id.ne(tag_id))
             .one(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?
+            .during(ControllerOperation::ManageTags)?
             .is_some()
         {
             return Err(ControllerError::TagAlreadyExists);
@@ -718,7 +699,7 @@ impl AppController {
         let links = tag_has_tags::Entity::find()
             .all(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+            .during(ControllerOperation::ManageTags)?;
         let mut pending = sub_tag_ids.to_vec();
         let mut visited = std::collections::HashSet::new();
         while let Some(id) = pending.pop() {
@@ -734,17 +715,14 @@ impl AppController {
                 );
             }
         }
-        for id in sub_tag_ids.iter().copied().unique() {
-            if tags::Entity::find_by_id(id)
-                .one(&transaction)
-                .await
-                .map_err(|error| {
-                    ControllerError::operation(ControllerOperation::ManageTags, error)
-                })?
-                .is_none()
-            {
-                return Err(ControllerError::TagNotFound);
-            }
+        let sub_tag_ids = sub_tag_ids.iter().copied().unique().collect_vec();
+        let found_sub_tags = tags::Entity::find()
+            .filter(tags::Column::Id.is_in(sub_tag_ids.clone()))
+            .count(&transaction)
+            .await
+            .during(ControllerOperation::ManageTags)?;
+        if found_sub_tags != sub_tag_ids.len() as u64 {
+            return Err(ControllerError::TagNotFound);
         }
         let mut tag = tag.into_active_model();
         tag.name = Set(name.to_string());
@@ -752,13 +730,13 @@ impl AppController {
         tag.updated_at = Set(chrono::Utc::now().naive_utc());
         tag.update(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+            .during(ControllerOperation::ManageTags)?;
         tag_has_tags::Entity::delete_many()
             .filter(tag_has_tags::Column::SuperTagId.eq(tag_id))
             .exec(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
-        for id in sub_tag_ids.iter().copied().unique() {
+            .during(ControllerOperation::ManageTags)?;
+        for id in sub_tag_ids {
             tag_has_tags::ActiveModel {
                 super_tag_id: Set(tag_id),
                 sub_tag_id: Set(id),
@@ -766,12 +744,12 @@ impl AppController {
             }
             .insert(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+            .during(ControllerOperation::ManageTags)?;
         }
         transaction
             .commit()
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))
+            .during(ControllerOperation::ManageTags)
     }
 
     pub async fn delete_tag(&self, tag_id: i32) -> ControllerResult<()> {
@@ -780,12 +758,12 @@ impl AppController {
         let transaction = connection
             .begin()
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+            .during(ControllerOperation::ManageTags)?;
         file_has_tags::Entity::delete_many()
             .filter(file_has_tags::Column::TagId.eq(tag_id))
             .exec(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+            .during(ControllerOperation::ManageTags)?;
         tag_has_tags::Entity::delete_many()
             .filter(
                 Condition::any()
@@ -794,15 +772,15 @@ impl AppController {
             )
             .exec(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+            .during(ControllerOperation::ManageTags)?;
         tags::Entity::delete_by_id(tag_id)
             .exec(&transaction)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?;
+            .during(ControllerOperation::ManageTags)?;
         transaction
             .commit()
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))
+            .during(ControllerOperation::ManageTags)
     }
 
     pub async fn assign_tag(&self, file_id: i32, tag_id: i32) -> ControllerResult<()> {
@@ -811,7 +789,7 @@ impl AppController {
         if files::Entity::find_by_id(file_id)
             .one(connection.as_ref())
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?
+            .during(ControllerOperation::ManageTags)?
             .is_none()
         {
             return Err(ControllerError::FileNotFound);
@@ -819,7 +797,7 @@ impl AppController {
         if tags::Entity::find_by_id(tag_id)
             .one(connection.as_ref())
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?
+            .during(ControllerOperation::ManageTags)?
             .is_none()
         {
             return Err(ControllerError::TagNotFound);
@@ -829,7 +807,7 @@ impl AppController {
             .filter(file_has_tags::Column::TagId.eq(tag_id))
             .one(connection.as_ref())
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))?
+            .during(ControllerOperation::ManageTags)?
             .is_some()
         {
             return Ok(());
@@ -842,7 +820,7 @@ impl AppController {
         .insert(connection.as_ref())
         .await
         .map(|_| ())
-        .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))
+        .during(ControllerOperation::ManageTags)
     }
 
     pub async fn remove_tag(&self, file_id: i32, tag_id: i32) -> ControllerResult<()> {
@@ -853,15 +831,23 @@ impl AppController {
             .exec(database_manager.get_connection().as_ref())
             .await
             .map(|_| ())
-            .map_err(|error| ControllerError::operation(ControllerOperation::ManageTags, error))
+            .during(ControllerOperation::ManageTags)
+    }
+
+    /// Read from the open workspace without holding the state lock across awaits.
+    async fn with_workspace<T>(
+        &self,
+        read: impl FnOnce(&mut Workspace) -> T,
+    ) -> ControllerResult<T> {
+        match &mut *self.state.lock().await {
+            AppState::Ready { workspace, .. } => Ok(read(workspace)),
+            AppState::AwaitingLibrary => Err(ControllerError::NoLibrarySelected),
+        }
     }
 
     async fn database_manager(&self) -> ControllerResult<Arc<DatabaseManager>> {
-        let state = self.state.lock().await;
-        let AppState::Ready { workspace, .. } = &*state else {
-            return Err(ControllerError::NoLibrarySelected);
-        };
-        Ok(Arc::clone(&workspace.database_manager))
+        self.with_workspace(|workspace| Arc::clone(&workspace.database_manager))
+            .await
     }
 
     fn tag_name(name: &str) -> ControllerResult<&str> {
@@ -881,7 +867,7 @@ impl AppController {
         )?;
         let workspace = Workspace::open(&library)
             .await
-            .map_err(|error| ControllerError::operation(ControllerOperation::OpenLibrary, error))?;
+            .during(ControllerOperation::OpenLibrary)?;
         *self.state.lock().await = AppState::Ready {
             _library: library,
             workspace,
@@ -930,7 +916,7 @@ impl Workspace {
             database_manager,
             file_operations,
             thumbnail_processor,
-            watcher_started: false,
+            watcher: None,
         })
     }
 }
@@ -1249,6 +1235,30 @@ mod tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watcher_stores_created_files() -> Result<()> {
+        let data_home = TempDir::new()?;
+        let content = TempDir::new()?;
+        let controller = AppController::new_in(data_home.path())?;
+        controller.create_library("Watched", content.path()).await?;
+        controller.initialize_workspace().await?;
+
+        let mut changes = controller.start_watching().await?;
+        assert!(matches!(
+            controller.start_watching().await,
+            Err(ControllerError::OperationFailed { .. })
+        ));
+        // Let the watcher register the root before creating the file.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        std::fs::write(content.path().join("watched-entry.txt"), "new")?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), changes.recv())
+            .await?
+            .context("the watcher stopped")?;
+
+        assert_eq!(controller.list_files(None, "watched-entry").await?.len(), 1);
         Ok(())
     }
 
