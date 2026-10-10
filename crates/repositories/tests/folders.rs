@@ -44,9 +44,7 @@ async fn roots_and_nested_folders_persist_by_location_and_object() -> Result<()>
         .await?;
     assert_eq!(report.folder_inserted, 1);
 
-    let roots = repository
-        .find_root_folders(Some(database.get_connection().as_ref()))
-        .await?;
+    let roots = repository.find_root_folders().await?;
     let root = roots.first().context("watched root was not persisted")?;
     assert_eq!(root.path, canonical_root.to_string_lossy());
     assert_eq!(root.parent_folder_id, None);
