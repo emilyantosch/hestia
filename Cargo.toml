@@ -11,7 +11,6 @@ version = "0.1.0"
 aes-gcm = "0.10.3"
 anyhow = { version = "1.0.98" }
 argon2 = { features = [  ], version = "0.6.0-rc.0" }
-async-recursion = "1.1.1"
 async-std = { features = [ "attributes", "tokio1" ], version = "*" }
 async-trait = "0.1.89"
 blake3 = "1.8.2"

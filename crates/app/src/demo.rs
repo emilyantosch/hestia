@@ -266,7 +266,11 @@ mod tests {
         let library = DemoLibrary::load().await?;
         assert_eq!(library.files.len(), SAMPLES.len());
         assert_eq!(library.tags.len(), 4);
-        assert_eq!(library.folders.len(), 5, "Includes the root and empty Archive");
+        assert_eq!(
+            library.folders.len(),
+            5,
+            "Includes the root and empty Archive"
+        );
         for sample in SAMPLES {
             let file = library
                 .files

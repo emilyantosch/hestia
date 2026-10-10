@@ -48,7 +48,7 @@ fn main() -> Result<()> {
             };
             cx.spawn(async move |cx| {
                 let result = cx.open_window(options, |window, cx| {
-                    window.set_window_title("Hestia — GPUI discovery");
+                    window.set_window_title("Hestia");
                     let view = cx.new(|cx| ui::FileManager::new(library, window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 });

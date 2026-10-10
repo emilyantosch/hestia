@@ -3907,7 +3907,6 @@ name = "hash"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-recursion",
  "blake3",
  "serde",
  "tempfile",
@@ -8272,7 +8271,6 @@ name = "services"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-recursion",
  "async-trait",
  "chrono",
  "entity",

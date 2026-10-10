@@ -10,16 +10,27 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     list::{List, ListDelegate, ListItem, ListState},
     oklch,
-    sidebar::{SidebarGroup, SidebarItem as _, SidebarMenu, SidebarMenuItem},
+    sidebar::{SidebarItem as _, SidebarMenuItem},
+    slider::{Slider, SliderEvent, SliderState},
     tag::Tag,
     tree::{Tree, TreeItem, TreeState},
     v_flex,
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
-    Subscription, Task, WeakEntity, Window, div, img, prelude::FluentBuilder as _, px, rgb,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, Task, WeakEntity, Window, div, img,
+    prelude::FluentBuilder as _, px, rgb,
 };
+use std::collections::HashMap;
+use std::rc::Rc;
+
+const SIDEBAR_WIDTH: f32 = 232.;
+const INSPECTOR_WIDTH: f32 = 288.;
+const TOOLBAR_HEIGHT: f32 = 52.;
+const ROW_HEIGHT: f32 = 28.;
+const GRID_PADDING: f32 = 20.;
+const GRID_GAP: f32 = 12.;
 
 #[derive(Default)]
 struct Appearance(Option<ThemeMode>);
@@ -43,7 +54,7 @@ fn apply_palette(theme: &mut Theme) {
             0x0026_2c23,
             0x0049_5242,
             0x00b8_b2a7,
-            0x0038_3a20,
+            0x00e0_cf3c,
         )
     } else {
         (
@@ -97,14 +108,18 @@ fn apply_palette(theme: &mut Theme) {
         sidebar: surface,
         sidebar_foreground: foreground,
         sidebar_border: border,
-        sidebar_accent: grass,
-        sidebar_accent_foreground: ink,
+        // Selection is a quiet tint; solid accent fills are reserved for primary actions.
+        sidebar_accent: active,
+        sidebar_accent_foreground: foreground,
+        list_active: active,
+        list_active_border: grass,
+        list_hover: hover,
         scrollbar_thumb: border,
         scrollbar_thumb_hover: muted,
         info: rgb(0x002b_a0ff).into(),
         danger: rgb(0x00ff_705d).into(),
         warning: rgb(sunshine).into(),
-        warning_foreground: foreground,
+        warning_foreground: ink,
         ..theme.colors
     };
     theme.tokens = theme.colors.into();
@@ -119,6 +134,7 @@ pub(crate) struct FileManager {
     folder_tree: Entity<TreeState>,
     _folder_subscription: Subscription,
     selected: Option<usize>,
+    thumbnail_slider: Entity<SliderState>,
     tag_input: Entity<InputState>,
     editing_tag: Option<i32>,
     creating_tag: bool,
@@ -202,6 +218,7 @@ impl FileManager {
             });
         let search_subscription =
             cx.subscribe(&sub_tag_search, |_, _, _: &InputEvent, cx| cx.notify());
+        let (thumbnail_slider, slider_subscription) = Self::new_thumbnail_slider(cx);
         let (folder_tree, folder_subscription) = Self::new_folder_tree(&library, cx);
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -214,6 +231,7 @@ impl FileManager {
             folder_tree,
             _folder_subscription: folder_subscription,
             selected: Some(0),
+            thumbnail_slider,
             tag_input,
             editing_tag: None,
             creating_tag: false,
@@ -230,16 +248,37 @@ impl FileManager {
                 color_subscription,
                 picker_subscription,
                 search_subscription,
+                slider_subscription,
             ],
             _appearance_subscription: subscription,
         }
+    }
+
+    fn new_thumbnail_slider(cx: &mut Context<Self>) -> (Entity<SliderState>, Subscription) {
+        // Set the maximum first: the minimum is clamped against the default maximum of 100.
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .max(280.)
+                .min(120.)
+                .step(10.)
+                .default_value(180.)
+        });
+        let subscription = cx.subscribe(&slider, |_, _, _: &SliderEvent, cx| cx.notify());
+        (slider, subscription)
     }
 
     fn new_folder_tree(
         library: &DemoLibrary,
         cx: &mut Context<Self>,
     ) -> (Entity<TreeState>, Subscription) {
-        let tree = cx.new(|cx| TreeState::new(cx).items(folder_items(&library.folders, None)));
+        // Library roots are shown in the sidebar header, so the tree starts at their children.
+        let items: Vec<_> = library
+            .folders
+            .iter()
+            .filter(|folder| folder.parent_id().is_none())
+            .flat_map(|root| folder_items(&library.folders, Some(root.id())))
+            .collect();
+        let tree = cx.new(|cx| TreeState::new(cx).items(items));
         let subscription = cx.observe(&tree, |this, tree, cx| {
             let folder = tree
                 .read(cx)
@@ -491,6 +530,13 @@ impl FileManager {
         self.tag_error = None;
         cx.notify();
         cx.spawn_in(window, async move |view, cx| {
+            // Poll on GPUI's clock: awaiting the Tokio handle directly would wake this task
+            // from a Tokio worker, which the deterministic test scheduler rejects.
+            while !save.is_finished() {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(5))
+                    .await;
+            }
             let result = save.await.unwrap_or_else(|error| Err(error.into()));
             let _closed_view = view.update_in(cx, |this, window, cx| {
                 this.saving_tag = false;
@@ -634,22 +680,43 @@ impl FileManager {
             )
         });
     }
-
-    fn search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn toolbar(&self, title: String, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let shortcut = if cfg!(target_os = "macos") {
-            "⌘ P"
+            "⌘P"
         } else {
-            "Ctrl P"
+            "Ctrl+P"
         };
+        let muted = cx.theme().muted_foreground;
         h_flex()
-            .w_full()
-            .gap_2()
+            .h(px(TOOLBAR_HEIGHT))
+            .flex_shrink_0()
+            .px_5()
+            .gap_4()
+            .border_b_1()
+            .border_color(cx.theme().border)
             .child(
-                Button::new("open-search")
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    .h_9()
-                    .rounded_lg()
+                    .gap_2()
+                    .items_baseline()
+                    .child(div().text_sm().font_semibold().truncate().child(title))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(item_count(count)),
+                    ),
+            )
+            .child(
+                Button::new("open-search")
+                    .w(px(320.))
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .h_8()
+                    .px_2p5()
+                    .rounded_md()
                     .bg(cx.theme().background)
                     .border_color(cx.theme().border)
                     .accessibility_label("Search files or tags")
@@ -657,120 +724,130 @@ impl FileManager {
                         h_flex()
                             .w_full()
                             .gap_2()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(Icon::new(IconName::Search).size_4())
-                            .child(div().flex_1().text_left().truncate().child(
+                            .text_sm()
+                            .text_color(muted)
+                            .child(Icon::new(IconName::Search).size_3p5())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_left()
+                                    .truncate()
+                                    .when(!self.query.is_empty(), |this| {
+                                        this.text_color(cx.theme().foreground)
+                                    })
+                                    .child(if self.query.is_empty() {
+                                        "Search".to_owned()
+                                    } else {
+                                        self.query.clone()
+                                    }),
+                            )
+                            .map(|this| {
                                 if self.query.is_empty() {
-                                    "Search files or tags…".to_owned()
+                                    this.child(div().text_xs().child(shortcut))
                                 } else {
-                                    self.query.clone()
-                                },
-                            ))
-                            .child(div().text_xs().child(shortcut)),
+                                    this.child(
+                                        Button::new("clear-search")
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(IconName::X)
+                                            .accessibility_label("Clear search")
+                                            .tooltip("Clear search")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.query.clear();
+                                                this.select_first_visible();
+                                                cx.notify();
+                                            })),
+                                    )
+                                }
+                            }),
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
             )
-            .when(!self.query.is_empty(), |this| {
-                this.child(
-                    Button::new("clear-search")
-                        .ghost()
-                        .icon(IconName::X)
-                        .accessibility_label("Clear search")
-                        .tooltip("Clear search")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.query.clear();
-                            this.select_first_visible();
-                            cx.notify();
-                        })),
-                )
-            })
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_end()
+                    .gap_2()
+                    .text_color(muted)
+                    .child(Icon::new(IconName::Image).size_3())
+                    .child(
+                        div()
+                            .id("thumbnail-size")
+                            .test_support()
+                            .w(px(96.))
+                            .child(Slider::new(&self.thumbnail_slider)),
+                    )
+                    .child(Icon::new(IconName::Image).size_4()),
+            )
     }
 
     fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.library.files.len();
+        let muted = cx.theme().muted_foreground;
+        let library = self
+            .library
+            .folders
+            .iter()
+            .find(|folder| folder.parent_id().is_none())
+            .map_or("Library", controllers::FolderInfo::name)
+            .to_owned();
         v_flex()
-            .id("library-sidebar")
+            .w(px(SIDEBAR_WIDTH))
             .h_full()
-            .overflow_y_scroll()
-            .p_3()
+            .flex_shrink_0()
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
-            .w(px(216.))
-            .flex_shrink_0()
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
-                SidebarGroup::new("LIBRARY")
-                    .child(
-                        SidebarMenu::new().child(
-                            SidebarMenuItem::new("All files")
-                                .icon(IconName::Folder)
-                                .active(self.active_tag.is_none() && self.active_folder.is_none())
-                                .suffix(move |_, _| div().text_xs().child(count.to_string()))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.active_tag = None;
-                                    this.clear_folder_filter(cx);
-                                })),
-                        ),
-                    )
-                    .render("library-group", window, cx),
+                h_flex()
+                    .h(px(TOOLBAR_HEIGHT))
+                    .flex_shrink_0()
+                    .px_4()
+                    .gap_2()
+                    .child(Icon::new(IconName::Library).size_4().text_color(muted))
+                    .child(div().text_sm().font_semibold().truncate().child(library)),
             )
             .child(
-                div()
-                    .id("tags-section")
-                    .test_support()
-                    .relative()
-                    .group("tags-section")
+                v_flex()
+                    .id("library-sidebar")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_2()
+                    .pb_4()
+                    .gap_4()
                     .child(
-                        SidebarGroup::new("TAGS")
-                            .child(SidebarMenu::new().children(self.library.tags.iter().map(
-                                |tag| {
-                                    let id = tag.id();
-                                    let count = self.library.visible_files(Some(id), "").len();
-                                    let view = cx.weak_entity();
-                                    let saving = self.saving_tag;
-                                    let label = format!("Edit {} tag", tag.name());
-                                    let color = tag_color(tag, cx);
-                                    SidebarMenuItem::new(tag.name().to_owned())
-                                        .icon(IconName::Tag)
-                                        .active(self.active_tag == Some(id))
-                                        .suffix(move |_, _| {
-                                            let view = view.clone();
-                                            h_flex()
-                                                .gap_1()
-                                                .child(div().size_2().rounded_full().bg(color))
-                                                .child(div().text_xs().child(count.to_string()))
-                                                .child(
-                                                    Button::new(("edit-tag", id as u32))
-                                                        .xsmall()
-                                                        .ghost()
-                                                        .icon(IconName::Pencil)
-                                                        .accessibility_label(label.clone())
-                                                        .tooltip(label.clone())
-                                                        .disabled(saving)
-                                                        .on_click(move |_, window, cx| {
-                                                            cx.stop_propagation();
-                                                            let _closed_view =
-                                                                view.update(cx, |this, cx| {
-                                                                    this.edit_tag(id, window, cx);
-                                                                });
-                                                        }),
-                                                )
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.active_tag = Some(id);
-                                            this.select_first_visible();
-                                            cx.notify();
-                                        }))
-                                },
-                            )))
-                            .render("tags-group", window, cx),
+                        SidebarMenuItem::new("All files")
+                            .icon(Icon::new(IconName::LayoutGrid).size_4())
+                            .active(self.active_tag.is_none() && self.active_folder.is_none())
+                            .suffix(move |_, _| sidebar_count(count, muted))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_tag = None;
+                                this.clear_folder_filter(cx);
+                            }))
+                            .render("all-files", window, cx),
                     )
+                    .child(self.folders(cx))
+                    .child(self.tags_section(window, cx)),
+            )
+    }
+
+    fn tags_section(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        v_flex()
+            .id("tags-section")
+            .test_support()
+            .group("tags-section")
+            .child(
+                h_flex()
+                    .justify_between()
+                    .pr_1()
+                    .child(sidebar_heading("Tags", cx))
                     .child(
                         Button::new("create-tag")
-                            .absolute()
-                            .top_1()
-                            .right_2()
                             .opacity(0.)
                             .group_hover("tags-section", |this| this.opacity(1.))
                             .focus_visible(|this| this.opacity(1.))
@@ -783,58 +860,176 @@ impl FileManager {
                             .on_click(cx.listener(|this, _, window, cx| this.new_tag(window, cx))),
                     ),
             )
+            .children(self.library.tags.iter().map(|tag| {
+                let id = tag.id();
+                let count = self.library.visible_files(Some(id), "").len();
+                let view = cx.weak_entity();
+                let saving = self.saving_tag;
+                let label = format!("Edit {} tag", tag.name());
+                let row = SharedString::from(format!("tag-row-{id}"));
+                let hover_row = row.clone();
+                div()
+                    .id(("tag-row", id as u32))
+                    .test_support()
+                    .group(row)
+                    .child(
+                        SidebarMenuItem::new(tag.name().to_owned())
+                            .icon(
+                                Icon::new(IconName::Tag)
+                                    .size_4()
+                                    .text_color(tag_color(tag, cx)),
+                            )
+                            .active(self.active_tag == Some(id))
+                            .suffix(move |_, _| {
+                                let view = view.clone();
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new(("edit-tag", id as u32))
+                                            .opacity(0.)
+                                            .group_hover(hover_row.clone(), |this| this.opacity(1.))
+                                            .focus_visible(|this| this.opacity(1.))
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(IconName::Pencil)
+                                            .accessibility_label(label.clone())
+                                            .tooltip(label.clone())
+                                            .disabled(saving)
+                                            .on_click(move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                let _closed_view = view.update(cx, |this, cx| {
+                                                    this.edit_tag(id, window, cx);
+                                                });
+                                            }),
+                                    )
+                                    .child(sidebar_count(count, muted))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.active_tag = Some(id);
+                                this.select_first_visible();
+                                cx.notify();
+                            }))
+                            .render(("tag", id as u32), window, cx),
+                    )
+            }))
     }
 
-    fn card(&self, index: usize, cx: &mut Context<Self>) -> Option<Button> {
+    fn folders(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tree = self.folder_tree.read(cx);
+        let rows = (0..self.library.folders.len())
+            .take_while(|ix| tree.entry(*ix).is_some())
+            .count();
+        let counts: Rc<HashMap<String, usize>> = Rc::new(
+            self.library
+                .folders
+                .iter()
+                .map(|folder| {
+                    let count = self
+                        .library
+                        .files
+                        .iter()
+                        .filter(|file| file.info.path().starts_with(folder.path()))
+                        .count();
+                    (folder.id().to_string(), count)
+                })
+                .collect(),
+        );
+        let muted = cx.theme().muted_foreground;
+        v_flex()
+            .when(rows == 0, gpui_kit::Styled::hidden)
+            .child(sidebar_heading("Folders", cx))
+            .child(
+                div()
+                    .id("folder-tree")
+                    .test_support()
+                    .h(px(rows as f32 * ROW_HEIGHT))
+                    .child(Tree::new(&self.folder_tree, move |_, entry, _, _, _| {
+                        let count = counts.get(entry.item().id.as_ref()).copied().unwrap_or(0);
+                        ListItem::new(format!("folder-{}", entry.item().id))
+                            .h(px(ROW_HEIGHT))
+                            .py_0()
+                            .pl(px(4. + entry.depth() as f32 * 14.))
+                            .pr_2()
+                            .rounded_md()
+                            .text_sm()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .min_w_0()
+                                    .child(
+                                        Icon::new(if entry.is_expanded() {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size_3()
+                                        .text_color(muted)
+                                        .when(!entry.is_folder(), gpui_kit::Styled::invisible),
+                                    )
+                                    .child(
+                                        Icon::new(if entry.is_expanded() {
+                                            IconName::FolderOpen
+                                        } else {
+                                            IconName::Folder
+                                        })
+                                        .size_4()
+                                        .text_color(muted),
+                                    )
+                                    .child(
+                                        div().ml_1().truncate().child(entry.item().label.clone()),
+                                    ),
+                            )
+                            .suffix(move |_, _| sidebar_count(count, muted))
+                    })),
+            )
+    }
+
+    fn tile(&self, index: usize, height: f32, cx: &mut Context<Self>) -> Option<Button> {
         let file = self.library.files.get(index)?;
         let selected = self.selected == Some(index);
         Some(
             Button::new(("file", index))
+                .ghost()
                 .accessibility_label(format!("Select {}", file.info.name()))
                 .selected(selected)
                 .w_full()
-                .h(px(248.))
-                .p_0()
+                .h(px(height + 56.))
+                .p_1p5()
                 .rounded_lg()
-                .bg(cx.theme().popover)
+                .bg(gpui_kit::transparent_black())
                 .text_color(cx.theme().foreground)
-                .border_color(if selected {
-                    cx.theme().ring
-                } else {
-                    cx.theme().border
-                })
                 .child(
                     v_flex()
                         .size_full()
-                        .overflow_hidden()
-                        .rounded_lg()
-                        .child(preview(file, 150., cx))
+                        .gap_1p5()
+                        .child(thumbnail(file, height, selected, cx))
                         .child(
                             v_flex()
-                                .gap_2()
-                                .p_3()
                                 .w_full()
                                 .min_w_0()
+                                .items_center()
+                                .gap_0p5()
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .max_w_full()
+                                        .px_1p5()
+                                        .rounded_sm()
+                                        .text_xs()
                                         .font_medium()
                                         .truncate()
+                                        .when(selected, |this| {
+                                            this.bg(cx.theme().primary)
+                                                .text_color(cx.theme().primary_foreground)
+                                        })
                                         .child(file.info.name().to_owned()),
-                                )
-                                .child(
-                                    h_flex()
-                                        .overflow_hidden()
-                                        .gap_1()
-                                        .children(self.file_tags(file, false, cx)),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
                                         .child(format!(
-                                            "{}  ·  {}",
-                                            file.kind(),
+                                            "{} · {}",
+                                            extension(file),
                                             file_size(file.bytes)
                                         )),
                                 ),
@@ -1017,7 +1212,7 @@ impl FileManager {
         let color_error = parse_tag_color(&self.color_input.read(cx).value()).err();
         v_flex()
             .gap_3()
-            .child(section_label("COLOR", cx))
+            .child(section_label("Color", cx))
             .child(
                 h_flex().flex_wrap().gap_1().children(
                     [
@@ -1083,7 +1278,7 @@ impl FileManager {
                         .child(error),
                 )
             })
-            .child(section_label("SUB-TAGS", cx))
+            .child(section_label("Sub-tags", cx))
             .when(searchable, |this| {
                 this.child(
                     Input::new(&self.sub_tag_search)
@@ -1135,161 +1330,167 @@ impl FileManager {
             )
     }
 
-    fn folders(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .gap_2()
-            .flex_shrink_0()
-            .pb_4()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(section_label("FOLDERS", cx))
-                    .child(
-                        Button::new("all-folders")
-                            .xsmall()
-                            .ghost()
-                            .label("All folders")
-                            .disabled(self.active_folder.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| this.clear_folder_filter(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .id("folder-tree")
-                    .test_support()
-                    .h(px(180.))
-                    .child(Tree::new(&self.folder_tree, |_, entry, _, _, _| {
-                        ListItem::new(format!("folder-{}", entry.item().id))
-                            .pl(px(entry.depth() as f32 * 16.))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .min_w_0()
-                                    .child(
-                                        Icon::new(if entry.is_expanded() {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        })
-                                        .size_3()
-                                        .when(!entry.is_folder(), gpui_kit::Styled::invisible),
-                                    )
-                                    .child(
-                                        Icon::new(if entry.is_expanded() {
-                                            IconName::FolderOpen
-                                        } else {
-                                            IconName::Folder
-                                        })
-                                        .size_4(),
-                                    )
-                                    .child(div().truncate().child(entry.item().label.clone())),
-                            )
-                    })),
-            )
-    }
-
-    fn details(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = v_flex()
             .id("file-details")
             .overflow_y_scroll()
-            .w(px(264.))
+            .w(px(INSPECTOR_WIDTH))
             .h_full()
             .flex_shrink_0()
-            .p_5()
-            .gap_5()
             .border_l_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .child(self.folders(cx))
-            .child(h_flex().justify_between().text_sm().font_medium().child(
-                if self.creating_tag {
-                    "New tag"
-                } else if self.editing_tag.is_some() {
-                    "Edit tag"
-                } else {
-                    "File details"
-                },
-            ));
+            .bg(cx.theme().sidebar);
         if self.editing_tag.is_some() || self.creating_tag {
-            return panel.child(self.tag_editor(None, cx));
+            return panel
+                .p_4()
+                .gap_4()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().font_semibold().child(if self.creating_tag {
+                            "New tag"
+                        } else {
+                            "Edit tag"
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if self.creating_tag {
+                                    "Press Enter to create it."
+                                } else {
+                                    "Changes apply to every file with this tag."
+                                }),
+                        ),
+                )
+                .child(self.tag_editor(None, cx));
         }
         let Some(file) = self
             .selected
             .and_then(|index| self.library.files.get(index))
         else {
             return panel
+                .p_4()
+                .gap_4()
                 .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Select a file to take a closer look."),
+                    v_flex()
+                        .pt_16()
+                        .items_center()
+                        .gap_2()
+                        .text_center()
+                        .child(
+                            Icon::new(IconName::Image)
+                                .size_8()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(div().text_sm().font_medium().child("No file selected"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Select a file to see its details."),
+                        ),
                 )
                 .when(self.tag_error.is_some(), |panel| {
                     panel.child(self.tag_editor(None, cx))
                 });
         };
-        panel
+        panel.children(self.file_inspector(file, cx))
+    }
+
+    fn file_inspector(&self, file: &DemoFile, cx: &mut Context<Self>) -> [gpui_kit::AnyElement; 4] {
+        let location = self.library.file_location(file);
+        let folder = std::path::Path::new(&location)
+            .parent()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        [
+            div()
+                .p_4()
+                .pb_0()
+                .child(thumbnail(file, 188., false, cx))
+                .into_any_element(),
+            v_flex()
+                .p_4()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .whitespace_normal()
+                                .child(file.info.name().to_owned()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("{} · {}", file.kind(), file_size(file.bytes))),
+                        ),
+                )
+                .child(
+                    Button::new("open-preview")
+                        .small()
+                        .w_full()
+                        .icon(IconName::Eye)
+                        .label("Preview")
+                        .accessibility_label("Preview file")
+                        .tooltip("Space")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_preview(window, cx);
+                        })),
+                )
+                .into_any_element(),
+            inspector_section("Tags", cx)
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(self.file_tags(file, true, cx)),
+                )
+                .child(self.tag_editor(Some(file), cx))
+                .into_any_element(),
+            inspector_section("Information", cx)
+                .child(detail_row("Type", file.kind(), cx))
+                .child(detail_row("Size", &file_size(file.bytes), cx))
+                .child(detail_row("Folder", &folder, cx))
+                .into_any_element(),
+        ]
+    }
+    fn empty_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let filtered =
+            !self.query.is_empty() || self.active_tag.is_some() || self.active_folder.is_some();
+        v_flex()
+            .pt_24()
+            .items_center()
+            .gap_2()
+            .child(
+                Icon::new(IconName::Search)
+                    .size_8()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(div().text_sm().font_medium().child("No matching files"))
             .child(
                 div()
-                    .rounded_lg()
-                    .overflow_hidden()
-                    .child(preview(file, 164., cx)),
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Try another search, folder or tag."),
             )
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .child(file.info.name().to_owned()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(file.kind()),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_3()
-                    .child(section_label("TAGS", cx))
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .children(self.file_tags(file, true, cx)),
-                    )
-                    .child(self.tag_editor(Some(file), cx)),
-            )
-            .child(
-                v_flex()
-                    .gap_3()
-                    .pt_4()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(section_label("INFORMATION", cx))
-                    .child(detail_row("Size", &file_size(file.bytes), cx))
-                    .child(detail_row("Library", "Learning library", cx))
-                    .child(detail_row("Source", "Demo files", cx)),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .pt_4()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(section_label("LOCATION", cx))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.library.file_location(file)),
-                    ),
-            )
+            .when(filtered, |this| {
+                this.child(
+                    Button::new("clear-filters")
+                        .small()
+                        .mt_2()
+                        .label("Show all files")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.query.clear();
+                            this.active_tag = None;
+                            this.clear_folder_filter(cx);
+                        })),
+                )
+            })
     }
 }
 
@@ -1304,50 +1505,72 @@ impl Render for FileManager {
             .find(|tag| Some(tag.id()) == self.active_tag)
             .map(controllers::TagInfo::name)
             .or_else(|| {
-                self.library.folders.iter()
+                self.library
+                    .folders
+                    .iter()
                     .find(|folder| Some(folder.id()) == self.active_folder)
                     .map(controllers::FolderInfo::name)
             })
             .unwrap_or("All files")
             .to_owned();
-        let columns = if window.viewport_size().width < px(1240.) {
-            2
-        } else {
-            3
-        };
-        v_flex().size_full().bg(cx.theme().background).text_color(cx.theme().foreground)
+        let grid_width = window.viewport_size().width / px(1.)
+            - SIDEBAR_WIDTH
+            - INSPECTOR_WIDTH
+            - 2. * GRID_PADDING;
+        let thumbnail_size = self.thumbnail_slider.read(cx).value().start();
+        let columns = ((grid_width + GRID_GAP) / (thumbnail_size + GRID_GAP))
+            .floor()
+            .max(1.) as u16;
+        let thumbnail_height = (thumbnail_size * 0.75).round();
+        v_flex()
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             .key_context("FileManager")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &crate::platform::OpenPreview, window, cx| {
-                if this.focus_handle.is_focused(window) {
-                    this.open_preview(window, cx);
-                } else {
-                    cx.propagate();
-                }
-            }))
-            .child(h_flex().flex_1().min_h_0()
-                .child(self.sidebar(window, cx))
-                .child(v_flex().id("file-content").test_support().flex_1().min_w_0().h_full()
-                    .child(v_flex().p_6().gap_5().flex_shrink_0()
-                        .child(self.search_bar(cx))
-                        .child(h_flex().justify_between().items_start()
-                            .child(div().text_3xl().font_semibold().child(title))
-                            .child(Tag::primary().child("Demo library")))
-                        .child(h_flex().justify_end()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("Files: {} · A–Z", visible.len())))))
-                    .child(div().id("file-grid-scroll").flex_1().min_h_0().overflow_y_scroll().px_6().pb_6()
-                        .child(div().grid().grid_cols(columns).gap_4().children(visible.iter().filter_map(|index| self.card(*index, cx))))
-                        .when(visible.is_empty(), |this| this.child(v_flex().p_10().items_center().gap_3()
-                            .child(Icon::new(IconName::Search).size_8().text_color(cx.theme().muted_foreground))
-                            .child(div().text_lg().child("No matching files"))
-                            .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Try another name or choose a different tag.")))))
-                )
-                .child(self.details(cx)))
-            .child(h_flex().h_8().flex_shrink_0().px_4().gap_2().border_t_1().border_color(cx.theme().border).bg(cx.theme().popover).text_xs().text_color(cx.theme().muted_foreground)
-                .child(div().size_1p5().rounded_full().bg(cx.theme().primary))
-                .child("Local & offline")
-                .child(div().flex_1())
-                .child(format!("{} sample files · Space to preview · No changes to your files", self.library.files.len())))
+            .on_action(
+                cx.listener(|this, _: &crate::platform::OpenPreview, window, cx| {
+                    if this.focus_handle.is_focused(window) {
+                        this.open_preview(window, cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.sidebar(window, cx))
+                    .child(
+                        v_flex()
+                            .id("file-content")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(self.toolbar(title, visible.len(), cx))
+                            .child(
+                                div()
+                                    .id("file-grid-scroll")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .p(px(GRID_PADDING))
+                                    .child(
+                                        div().grid().grid_cols(columns).gap(px(GRID_GAP)).children(
+                                            visible.iter().filter_map(|index| {
+                                                self.tile(*index, thumbnail_height, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .when(visible.is_empty(), |this| {
+                                        this.child(self.empty_grid(cx))
+                                    }),
+                            ),
+                    )
+                    .child(self.inspector(cx)),
+            )
             .children(dialogs)
     }
 }
@@ -1359,7 +1582,6 @@ fn folder_items(folders: &[controllers::FolderInfo], parent: Option<i32>) -> Vec
         .filter(|folder| folder.parent_id() == parent)
         .map(|folder| {
             TreeItem::new(folder.id().to_string(), folder.name().to_owned())
-                .expanded(parent.is_none())
                 .children(folder_items(folders, Some(folder.id())))
         })
         .collect()
@@ -1551,6 +1773,20 @@ fn tag_color(tag: &controllers::TagInfo, cx: &App) -> Hsla {
     }
 }
 
+fn sidebar_heading(label: &'static str, cx: &App) -> impl IntoElement {
+    h_flex()
+        .h_7()
+        .px_2()
+        .text_xs()
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child(label)
+}
+
+fn sidebar_count(count: usize, color: Hsla) -> impl IntoElement {
+    div().text_xs().text_color(color).child(count.to_string())
+}
+
 fn section_label(label: &'static str, cx: &App) -> impl IntoElement {
     div()
         .text_xs()
@@ -1559,72 +1795,139 @@ fn section_label(label: &'static str, cx: &App) -> impl IntoElement {
         .child(label)
 }
 
+fn inspector_section(label: &'static str, cx: &App) -> gpui_kit::Div {
+    v_flex()
+        .p_4()
+        .gap_2p5()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .child(section_label(label, cx))
+}
+
 fn detail_row(label: &'static str, value: &str, cx: &App) -> impl IntoElement {
     h_flex()
         .justify_between()
-        .gap_2()
+        .gap_4()
         .text_xs()
-        .child(div().text_color(cx.theme().muted_foreground).child(label))
-        .child(value.to_owned())
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
+        .child(div().min_w_0().truncate().child(value.to_owned()))
+}
+
+fn item_count(count: usize) -> String {
+    if count == 1 {
+        "1 item".into()
+    } else {
+        format!("{count} items")
+    }
 }
 
 fn file_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
-    } else {
+    } else if bytes < 1024 * 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024. * 1024.))
     }
 }
 
-fn preview(file: &DemoFile, height: f32, cx: &App) -> impl IntoElement {
-    let image = file.kind() == "PNG image";
+fn extension(file: &DemoFile) -> String {
+    file.info
+        .path()
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("File")
+        .to_uppercase()
+}
+
+fn thumbnail(file: &DemoFile, height: f32, selected: bool, cx: &App) -> impl IntoElement {
+    let kind = crate::preview::Kind::for_path(file.info.path());
+    let badge = div()
+        .absolute()
+        .bottom_1p5()
+        .left_1p5()
+        .px_1()
+        .rounded_sm()
+        .bg(gpui_kit::black().opacity(0.55))
+        .text_color(gpui_kit::white())
+        .text_size(px(9.))
+        .font_semibold()
+        .child(extension(file));
     div()
+        .relative()
         .w_full()
         .h(px(height))
         .flex_shrink_0()
         .overflow_hidden()
-        .bg(cx.theme().background)
-        .p_4()
+        .rounded_md()
+        .border_2()
+        .border_color(if selected {
+            cx.theme().primary
+        } else {
+            gpui_kit::transparent_black()
+        })
+        .bg(cx.theme().foreground.opacity(0.05))
         .flex()
         .items_center()
         .justify_center()
-        .when(image, |this| {
-            this.child(
+        .map(|this| match kind {
+            Some(crate::preview::Kind::Image) => this.child(
                 img(file.info.path().to_path_buf())
                     .size_full()
+                    .p_2()
                     .object_fit(gpui_kit::ObjectFit::Contain),
-            )
-        })
-        .when(!image, |this| {
-            this.child(
-                v_flex()
-                    .w_full()
-                    .h_full()
-                    .gap_3()
-                    .p_3()
-                    .bg(cx.theme().popover)
-                    .rounded_sm()
+            ),
+            Some(crate::preview::Kind::Video) => this.bg(rgb(0x0010_1210)).child(
+                div()
+                    .size_10()
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui_kit::white().opacity(0.16))
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(Icon::new(IconName::FileText).small())
-                            .child(div().text_xs().font_medium().child(file.kind())),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .whitespace_normal()
-                            .text_color(cx.theme().foreground)
-                            .child(file.excerpt),
+                        Icon::new(IconName::Play)
+                            .size_4()
+                            .text_color(gpui_kit::white()),
                     ),
-            )
+            ),
+            _ => this.child(
+                div()
+                    .w(gpui_kit::relative(0.62))
+                    .h(gpui_kit::relative(0.84))
+                    .p_2()
+                    .overflow_hidden()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().popover)
+                    .shadow_sm()
+                    .text_size(px(8.))
+                    .line_height(px(11.))
+                    .whitespace_normal()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(file.excerpt),
+            ),
         })
+        .child(badge)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The edit button only shows while its tag row is hovered or focused.
+    fn edit_tag(window: &mut Window, id: i32, cx: &mut App) {
+        use gpui_kit::test::TestWindowExt as _;
+        window.render_frame(cx);
+        window.hover(("tag-row", id as u32), cx);
+        window.click(("edit-tag", id as u32), cx);
+    }
 
     #[expect(
         clippy::expect_used,
@@ -1703,7 +2006,7 @@ mod tests {
                     .selected_entry()
                     .expect("Entry")
                     .depth(),
-                2
+                1
             );
             window.click("open-search", cx);
         })
@@ -1741,7 +2044,7 @@ mod tests {
             assert!(view.read(cx).visible_files().is_empty());
             assert!(view.read(cx).selected.is_none());
             assert!(window.find("folder-tree").visible());
-            window.click("all-folders", cx);
+            window.click("all-files", cx);
             assert!(view.read(cx).active_folder.is_none());
             assert_eq!(view.read(cx).visible_files().len(), 7);
         })
@@ -2061,7 +2364,10 @@ mod tests {
                 .find(|tag| tag.name() == "Personal")
                 .expect("New tag");
             assert!(manager.library.visible_files(Some(tag.id()), "").is_empty());
-            assert!(window.find(("edit-tag", tag.id() as u32)).visible());
+            let tag_id = tag.id();
+            window.render_frame(cx);
+            window.hover(("tag-row", tag_id as u32), cx);
+            assert!(window.find(("edit-tag", tag_id as u32)).visible());
             view.update(cx, |manager, cx| {
                 manager.selected = None;
                 cx.notify();
@@ -2151,7 +2457,7 @@ mod tests {
             assert_eq!(manager.library.visible_files(Some(id), "").len(), 2);
             assert_eq!(manager.selected, Some(1));
             assert_eq!(manager.library.tags.len(), 4);
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             assert_eq!(view.read(cx).tag_input.read(cx).value(), "Reference");
             assert!(window.has_focused_input(cx));
             window.press(select_all, cx);
@@ -2161,7 +2467,7 @@ mod tests {
             window.click("Blue", cx);
             window.click(("sub-tag", notes_id as u32), cx);
             assert!(window.try_find("cancel-tag-edit").is_none());
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             assert_eq!(view.read(cx).editing_color, None);
             assert!(view.read(cx).editing_sub_tags.is_empty());
             assert!(window.try_find(("sub-tag", id as u32)).is_none());
@@ -2219,7 +2525,7 @@ mod tests {
                     .iter()
                     .any(|tag| tag.id() == id && tag.name() == "Research")
             );
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             assert_eq!(view.read(cx).tag_input.read(cx).value(), "Research");
             assert_eq!(view.read(cx).editing_color, Some(0x00c4_a7ef));
             assert_eq!(view.read(cx).editing_sub_tags, vec![notes_id]);
@@ -2244,7 +2550,7 @@ mod tests {
         })
         .expect("Unchanged name is valid");
         cx.update_window(handle.into(), |_, window, cx| {
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             window.click(("sub-tag", notes_id as u32), cx);
             window.click("Auto", cx);
             window.click("add-tag", cx);
@@ -2255,7 +2561,7 @@ mod tests {
         })
         .await;
         cx.update_window(handle.into(), |_, window, cx| {
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             assert_eq!(view.read(cx).editing_color, None);
             assert!(view.read(cx).editing_sub_tags.is_empty());
             window.click("delete-tag", cx);
@@ -2463,7 +2769,7 @@ mod tests {
         };
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             assert!(
                 window.try_find("sub-tag-search").is_none(),
                 "Five candidates need no search"
@@ -2497,7 +2803,7 @@ mod tests {
         .await;
         cx.update_window(handle.into(), |_, window, cx| {
             assert!(view.read(cx).tag_error.is_none());
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             assert_eq!(view.read(cx).editing_color, Some(0x0063_6363));
             assert_eq!(view.read(cx).color_input.read(cx).value(), "#636363");
             let swatch = window.find("tag-color-picker").bounds();
@@ -2530,7 +2836,7 @@ mod tests {
         })
         .await;
         cx.update_window(handle.into(), |_, window, cx| {
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             assert_eq!(
                 view.read(cx).editing_color,
                 Some(0x0063_6363),
@@ -2571,7 +2877,7 @@ mod tests {
         .await;
         cx.update_window(handle.into(), |_, window, cx| {
             assert!(view.read(cx).tag_error.is_none());
-            window.click(("edit-tag", id as u32), cx);
+            edit_tag(window, id, cx);
             assert!(view.read(cx).sub_tag_search.read(cx).value().is_empty());
             assert_eq!(view.read(cx).editing_sub_tags, vec![notes_id]);
         })
@@ -2591,7 +2897,7 @@ mod tests {
                     0x0026_2c23,
                     0x0049_5242,
                     0x00b8_b2a7,
-                    0x0038_3a20,
+                    0x00e0_cf3c,
                 ]
             } else {
                 [
@@ -2621,7 +2927,10 @@ mod tests {
             assert_eq!(theme.sidebar_foreground, theme.foreground);
             assert_eq!(theme.button_foreground, theme.foreground);
             assert_eq!(theme.tokens.sidebar.color, theme.popover);
-            assert_eq!(theme.tokens.sidebar_accent.color, theme.primary);
+            assert_eq!(
+                theme.tokens.sidebar_accent.color,
+                theme.primary.opacity(0.25)
+            );
             assert_eq!(theme.tokens.button.color, theme.popover);
             assert_eq!(theme.tokens.button_primary.color, theme.primary);
             assert_eq!(theme.tokens.scrollbar_thumb.color, theme.border);
