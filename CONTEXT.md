@@ -4,6 +4,10 @@ Hestia indexes filesystem entries while preserving their locations and recognizi
 
 ## Language
 
+**Library**:
+A named collection of watched roots with its own tags and index. Libraries share nothing with each other.
+_Avoid_: Vault, workspace
+
 **Watched Root**:
 A user-selected directory tree whose UTF-8 regular files and real directories belong to the library. Watched roots neither overlap nor cross filesystem device boundaries.
 _Avoid_: Watch path, library folder
