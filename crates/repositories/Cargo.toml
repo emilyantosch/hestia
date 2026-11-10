@@ -9,13 +9,11 @@ anyhow = { workspace = true }
 argon2 = { workspace = true }
 chrono = { workspace = true }
 entity = { workspace = true }
-events = { workspace = true }
 hash = { workspace = true }
 itertools = { workspace = true }
 library = { workspace = true }
 model = { workspace = true }
 moka = { workspace = true }
-notify = { workspace = true }
 sea-orm = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
@@ -24,7 +22,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 migration = { workspace = true }
-notify-debouncer-full = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 
