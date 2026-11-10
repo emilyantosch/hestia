@@ -87,7 +87,7 @@ mod macos {
 
     pub(super) fn update_icon(dark: bool) {
         let Some(mtm) = MainThreadMarker::new() else {
-            tracing::error!("Dock icon must be updated on the main thread");
+            tracing::warn!("Dock icon must be updated on the main thread");
             return;
         };
         let bytes: &[u8] = if dark {
@@ -97,7 +97,7 @@ mod macos {
         };
         let data = NSData::with_bytes(bytes);
         let Some(image) = NSImage::initWithData(mtm.alloc(), &data) else {
-            tracing::error!("Could not decode the Hestia Dock icon");
+            tracing::warn!("Could not decode the Hestia Dock icon");
             return;
         };
         let artwork = artwork_rect(image.size());

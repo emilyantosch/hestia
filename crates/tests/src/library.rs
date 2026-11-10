@@ -20,7 +20,7 @@ fn check_delete_library() -> Result<()> {
 
     //Delete Library
     if let Err(e) = lib.delete() {
-        tracing::error!("The lib could not get deleted due to {e:#?}");
+        tracing::warn!("The lib could not get deleted due to {e:#?}");
     }
 
     let still_exists = std::fs::exists(test_path)?;
