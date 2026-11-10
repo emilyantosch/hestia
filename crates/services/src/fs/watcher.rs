@@ -1,9 +1,8 @@
 use anyhow::{Context, Result, ensure};
-use events::{FileEvent, FolderEvent};
 use hash::{ContentDigest, FilesystemObjectId};
 use itertools::Itertools;
 use model::services::{CanonPath, IndexedPath};
-use notify::event::{CreateKind, EventKind, RemoveKind};
+use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
@@ -11,10 +10,27 @@ use notify_debouncer_full::{
 use repositories::fs::operations::FileRepository;
 use std::collections::HashSet;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
+
+/// A change to a file entry. The observations are absent when the entry was removed.
+#[derive(Debug)]
+pub struct FileEvent {
+    pub paths: Vec<PathBuf>,
+    pub kind: EventKind,
+    pub content_digest: Option<ContentDigest>,
+    pub filesystem_object_id: Option<FilesystemObjectId>,
+}
+
+/// A change to a folder. The observation is absent when the folder was removed.
+#[derive(Debug)]
+pub struct FolderEvent {
+    pub paths: Vec<PathBuf>,
+    pub kind: EventKind,
+    pub filesystem_object_id: Option<FilesystemObjectId>,
+}
 
 #[derive(Debug)]
 pub enum FSEvent {
@@ -135,7 +151,21 @@ pub async fn store_event(event: FSEvent, repository: &FileRepository) -> Result<
     match event {
         FSEvent::File(event) => match event.kind {
             EventKind::Create(_) | EventKind::Modify(_) => {
-                let file = repository.upsert_file_from_event(&event).await?;
+                let file = repository
+                    .upsert_file(
+                        event
+                            .paths
+                            .last()
+                            .context("cannot store a file event without a path")?,
+                        event
+                            .content_digest
+                            .context("cannot store a file event without a content digest")?,
+                        event
+                            .filesystem_object_id
+                            .context("cannot store a file event without a filesystem object ID")?,
+                        renamed_from(&event.paths, event.kind),
+                    )
+                    .await?;
                 tracing::info!("Stored file: {} (ID: {})", file.path, file.id);
             }
             EventKind::Remove(_) => {
@@ -148,7 +178,18 @@ pub async fn store_event(event: FSEvent, repository: &FileRepository) -> Result<
         },
         FSEvent::Folder(event) => match event.kind {
             EventKind::Create(_) | EventKind::Modify(_) => {
-                let folder = repository.upsert_folder_from_event(&event).await?;
+                let folder = repository
+                    .upsert_folder(
+                        event
+                            .paths
+                            .last()
+                            .context("cannot store a folder event without a path")?,
+                        event.filesystem_object_id.context(
+                            "cannot store a folder event without a filesystem object ID",
+                        )?,
+                        renamed_from(&event.paths, event.kind),
+                    )
+                    .await?;
                 tracing::info!("Stored folder: {} (ID: {})", folder.path, folder.id);
             }
             EventKind::Remove(_) => {
@@ -163,15 +204,22 @@ pub async fn store_event(event: FSEvent, repository: &FileRepository) -> Result<
     Ok(())
 }
 
+/// The old location of an entry when the event is a complete rename.
+fn renamed_from(paths: &[PathBuf], kind: EventKind) -> Option<&Path> {
+    match (kind, paths) {
+        (EventKind::Modify(ModifyKind::Name(RenameMode::Both)), [old_path, _]) => Some(old_path),
+        _ => None,
+    }
+}
+
 /// Classify a debounced event and observe the entry it points at. Access events are ignored.
-async fn observe(mut event: DebouncedEvent) -> Result<Option<FSEvent>> {
-    event.paths = event
+async fn observe(event: DebouncedEvent) -> Result<Option<FSEvent>> {
+    let kind = event.kind;
+    let paths: Vec<PathBuf> = event
         .paths
         .iter()
         .map(|path| IndexedPath::try_from(path.as_path()).map(PathBuf::from))
         .try_collect()?;
-    let kind = event.kind;
-    let paths = event.paths.clone();
     let path = paths
         .last()
         .context("watcher event does not contain a path")?;
@@ -188,9 +236,8 @@ async fn observe(mut event: DebouncedEvent) -> Result<Option<FSEvent>> {
             Some(FilesystemObjectId::observe(path).await?)
         };
         return Ok(Some(FSEvent::Folder(FolderEvent {
-            event,
-            kind,
             paths,
+            kind,
             filesystem_object_id,
         })));
     }
@@ -211,9 +258,8 @@ async fn observe(mut event: DebouncedEvent) -> Result<Option<FSEvent>> {
         (Some(content_digest), Some(filesystem_object_id))
     };
     Ok(Some(FSEvent::File(FileEvent {
-        event,
-        kind,
         paths,
+        kind,
         content_digest,
         filesystem_object_id,
     })))

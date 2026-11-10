@@ -82,7 +82,10 @@ async fn thumbnail_lookups_observe_writes_and_deletes_across_repositories() -> R
     assert_eq!(reader.get_thumbnail_by_id(stored.id).await?, Some(updated));
 
     assert_eq!(writer.delete_thumbnails_for_file(file_id).await?, 2);
-    assert!(reader.get_thumbnails_for_file(file_id).await?.is_empty());
+    assert_eq!(
+        reader.get_thumbnails_for_file(file_id).await?,
+        [] as [Thumbnail; 0]
+    );
     assert!(reader.get_thumbnail_by_id(stored.id).await?.is_none());
     writer.upsert_thumbnail(file_id, small.clone()).await?;
     assert_eq!(
@@ -92,7 +95,10 @@ async fn thumbnail_lookups_observe_writes_and_deletes_across_repositories() -> R
         Some(small)
     );
     assert!(files.delete_file_by_path(&path).await?);
-    assert!(reader.get_thumbnails_for_file(file_id).await?.is_empty());
+    assert_eq!(
+        reader.get_thumbnails_for_file(file_id).await?,
+        [] as [Thumbnail; 0]
+    );
     assert_eq!(writer.delete_orphaned_thumbnails().await?, 0);
     Ok(())
 }
@@ -151,11 +157,11 @@ async fn thumbnail_batch_lookups_observe_only_committed_changes() -> Result<()> 
             .await?,
         vec![updated.clone()]
     );
-    assert!(
+    assert_eq!(
         reader
             .get_thumbnails_for_filter(vec![], ThumbnailSize::Small)
-            .await?
-            .is_empty()
+            .await?,
+        [] as [Thumbnail; 0]
     );
 
     // An update followed by a foreign-key failure must not escape the transaction.
@@ -197,6 +203,9 @@ async fn thumbnail_batch_lookups_observe_only_committed_changes() -> Result<()> 
         Some(medium)
     );
     assert_eq!(files.batch_delete_files(vec![other_path]).await?, 1);
-    assert!(reader.get_thumbnails_for_file(other_id).await?.is_empty());
+    assert_eq!(
+        reader.get_thumbnails_for_file(other_id).await?,
+        [] as [Thumbnail; 0]
+    );
     Ok(())
 }

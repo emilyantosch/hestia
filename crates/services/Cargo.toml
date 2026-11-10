@@ -7,7 +7,6 @@ version.workspace = true
 anyhow = { workspace = true }
 chrono = { workspace = true }
 entity = { workspace = true }
-events = { workspace = true }
 hash = { workspace = true }
 image = { workspace = true }
 infer = { workspace = true }

@@ -4,7 +4,6 @@ use entity::file_types;
 use entity::prelude::FileTypes;
 use entity::{files, prelude::Files};
 use entity::{folders, prelude::Folders};
-use events::{FileEvent, FolderEvent};
 use hash::{ContentDigest, FilesystemObjectId};
 use itertools::Itertools;
 use model::services::CanonPath;
@@ -12,8 +11,6 @@ use model::services::IndexedPath;
 use model::services::file::{FileSystemFile as File, PersistedFile};
 use model::services::folder::FileSystemFolder as Folder;
 use moka::sync::Cache;
-use notify::EventKind;
-use notify::event::{ModifyKind, RenameMode};
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{BinOper, Expr, IntoColumnRef, SimpleExpr};
 use sea_orm::{
@@ -162,26 +159,24 @@ impl FileRepository {
         Ok(subfolders)
     }
 
-    pub async fn upsert_folder_from_event(&self, event: &FolderEvent) -> Result<folders::Model> {
+    /// Insert or update the folder observed at `folder_path`. `renamed_from` is the
+    /// location it was moved from, if any.
+    pub async fn upsert_folder(
+        &self,
+        folder_path: &Path,
+        filesystem_object_id: FilesystemObjectId,
+        renamed_from: Option<&Path>,
+    ) -> Result<folders::Model> {
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
-        let folder_path = IndexedPath::try_from(
-            event
-                .paths
-                .last()
-                .context("cannot upsert a folder event without a path")?
-                .as_path(),
-        )?;
+        let folder_path = IndexedPath::try_from(folder_path)?;
         let path = folder_path.as_str().to_owned();
-        let filesystem_object_id = event
-            .filesystem_object_id
-            .context("cannot upsert a folder event without a filesystem object ID")?;
         let parent_folder_id =
             Self::find_parent_folder_id(folder_path.as_ref(), &transaction).await?;
 
         let mut existing = Self::find_folder(&transaction, &path).await?;
         if existing.is_none()
-            && let Some(old_path) = Self::renamed_from(&event.paths, event.kind)
+            && let Some(old_path) = renamed_from
         {
             existing = Self::find_folder(&transaction, &Self::database_path(old_path)?).await?;
         }
@@ -197,30 +192,25 @@ impl FileRepository {
         Ok(folder_model)
     }
 
-    /// Insert or update a file in the database based on `FileEvent`
-    pub async fn upsert_file_from_event(&self, event: &FileEvent) -> Result<files::Model> {
+    /// Insert or update the file observed at `file_path`. `renamed_from` is the
+    /// location it was moved from, if any.
+    pub async fn upsert_file(
+        &self,
+        file_path: &Path,
+        content_digest: ContentDigest,
+        filesystem_object_id: FilesystemObjectId,
+        renamed_from: Option<&Path>,
+    ) -> Result<files::Model> {
         let connection = self.database_manager.get_connection();
         let transaction = connection.begin().await?;
-        let file_path = IndexedPath::try_from(
-            event
-                .paths
-                .last()
-                .context("cannot upsert a file event without a path")?
-                .as_path(),
-        )?;
+        let file_path = IndexedPath::try_from(file_path)?;
         let path = file_path.as_str().to_owned();
         let file_type_name = Self::detect_file_type(file_path.as_ref());
         let file_type_id = self.file_type_id(&file_type_name, &transaction).await?;
-        let content_digest = event
-            .content_digest
-            .context("cannot upsert a file event without a content digest")?;
-        let filesystem_object_id = event
-            .filesystem_object_id
-            .context("cannot upsert a file event without a filesystem object ID")?;
 
         let mut existing = Self::find_file(&transaction, &path).await?;
         if existing.is_none()
-            && let Some(old_path) = Self::renamed_from(&event.paths, event.kind)
+            && let Some(old_path) = renamed_from
         {
             existing = Self::find_file(&transaction, &Self::database_path(old_path)?).await?;
         }
@@ -345,16 +335,6 @@ impl FileRepository {
             .and_then(|name| name.to_str())
             .map(str::to_owned)
             .with_context(|| format!("path {} has no valid name", path.display()))
-    }
-
-    /// The old location of an entry when the event is a complete rename.
-    fn renamed_from(paths: &[PathBuf], kind: EventKind) -> Option<&Path> {
-        match (kind, paths) {
-            (EventKind::Modify(ModifyKind::Name(RenameMode::Both)), [old_path, _]) => {
-                Some(old_path)
-            }
-            _ => None,
-        }
     }
 
     async fn find_file<C: ConnectionTrait>(

@@ -782,6 +782,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use crate::TagInfo;
+
     use super::AppController;
     use anyhow::{Context, Result, bail};
     use tempfile::TempDir;
@@ -942,7 +944,7 @@ mod tests {
         controller.assign_tag(file_id, tag_id).await?;
         controller.remove_tag(file_id, tag_id).await?;
         controller.delete_tag(tag_id).await?;
-        assert!(controller.list_tags().await?.is_empty());
+        assert_eq!(controller.list_tags().await?, [] as [TagInfo; 0]);
         Ok(())
     }
 
@@ -1005,7 +1007,10 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining.first().context("Missing link")?.file_id, second);
         controller.remove_tag(second, id).await?;
-        assert!(links.all(connection.as_ref()).await?.is_empty());
+        assert_eq!(
+            links.all(connection.as_ref()).await?,
+            [] as [file_has_tags::Model; 0]
+        );
         assert_eq!(controller.list_tags().await?.len(), 2);
         Ok(())
     }
@@ -1077,7 +1082,7 @@ mod tests {
             .find(|tag| tag.id() == a)
             .context("Cleared A")?;
         assert_eq!(tag.color(), None);
-        assert!(tag.sub_tag_ids().is_empty());
+        assert_eq!(tag.sub_tag_ids(), [] as [i32; 0]);
         controller
             .update_tag(a, "A renamed", Some(0x0070_baff), &[b])
             .await?;
@@ -1091,17 +1096,17 @@ mod tests {
         );
         assert_eq!(controller.list_files(None, "").await?.len(), 1);
         let connection = controller.database_manager().await?.get_connection();
-        assert!(
+        assert_eq!(
             file_has_tags::Entity::find()
                 .all(connection.as_ref())
-                .await?
-                .is_empty()
+                .await?,
+            [] as [file_has_tags::Model; 0]
         );
-        assert!(
+        assert_eq!(
             tag_has_tags::Entity::find()
                 .all(connection.as_ref())
-                .await?
-                .is_empty()
+                .await?,
+            [] as [tag_has_tags::Model; 0]
         );
         Ok(())
     }

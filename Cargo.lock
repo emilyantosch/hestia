@@ -2308,19 +2308,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "events"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "hash",
- "notify 8.2.0",
- "notify-debouncer-full",
- "serde",
- "tokio",
-]
-
-[[package]]
 name = "exr"
 version = "1.74.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7431,15 +7418,12 @@ dependencies = [
  "argon2",
  "chrono",
  "entity",
- "events",
  "hash",
  "itertools 0.15.0",
  "library",
  "migration",
  "model",
  "moka",
- "notify 8.2.0",
- "notify-debouncer-full",
  "sea-orm",
  "secrecy",
  "serde",
@@ -8267,7 +8251,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "entity",
- "events",
  "hash",
  "image",
  "infer",
